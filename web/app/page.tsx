@@ -9,17 +9,17 @@ export interface LeaderboardRow {
   total_green_tests: number;
 }
 
-async function getLeaderboard(): Promise<LeaderboardRow[] | null> {
+async function getLeaderboard(): Promise<{ rows: LeaderboardRow[] | null; error: string | null }> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-  if (!url || !key) return null;
+  if (!url || !key) return { rows: null, error: null };
   const supabase = createClient(url, key);
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('profiles')
     .select('username,current_streak,longest_streak,total_green_tests')
     .order('total_green_tests', { ascending: false })
     .limit(25);
-  return (data ?? null) as LeaderboardRow[] | null;
+  return { rows: (data ?? null) as LeaderboardRow[] | null, error: error?.message ?? null };
 }
 
 function rankMedal(rank: number): string {
@@ -30,7 +30,7 @@ function rankMedal(rank: number): string {
 }
 
 export default async function Home() {
-  const rows = await getLeaderboard();
+  const { rows, error } = await getLeaderboard();
 
   return (
     <main
@@ -56,8 +56,9 @@ export default async function Home() {
         <h2 style={{ fontSize: 18, color: '#58a6ff' }}>Leaderboard</h2>
         {rows === null ? (
           <p style={{ color: '#8b949e' }}>
-            No Supabase configured for this deployment. Set NEXT_PUBLIC_SUPABASE_URL and
-            NEXT_PUBLIC_SUPABASE_ANON_KEY.
+            {error
+              ? `Leaderboard temporarily unavailable (${error}).`
+              : 'No Supabase configured for this deployment. Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.'}
           </p>
         ) : rows.length === 0 ? (
           <p style={{ color: '#8b949e' }}>No developers yet. Be the first to go green!</p>

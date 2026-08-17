@@ -59,7 +59,9 @@ Config precedence: **env var > `~/.config/redgreen/config.json`**. Key files nev
 
 RedGreen syncs session telemetry (feature name, tests passed, attack rounds survived, time-to-green) to a shared Supabase instance. Streaks update daily; the top 25 developers show on the public leaderboard:
 
-Instances are RLS-guarded: rows are only visible to their owner; the leaderboard exposes aggregate reads. **The anon key ships in the package by design** — it is a public identifier; all data protection comes from RLS. Deploy the dashboard from `web/` (Vercel/Next.js) with `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
+Instances are RLS-guarded: rows are only visible to their owner; the leaderboard exposes aggregate reads. **The anon key ships in the package by design** — it is a public identifier; all data protection comes from RLS.
+
+**Live leaderboard:** https://web-orpin-gamma-szs70xp49v.vercel.app · deploy from `web/` (Vercel/Next.js) with `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
 
 ### Bring your own Supabase
 
