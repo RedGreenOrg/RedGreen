@@ -37,6 +37,7 @@ export interface SessionSnapshot {
   statuses: Record<PhaseId, PhaseStatus>;
   result: TestRunResult | null;
   logs: string[];
+  events: SessionEvent[];
   prompt: string | null;
   moduleName: string | null;
   files: SessionFiles;
@@ -44,6 +45,13 @@ export interface SessionSnapshot {
   finished: boolean;
   finalGreen: boolean;
 }
+
+export type SessionEvent =
+  | { type: 'write'; message: string }
+  | { type: 'info'; message: string }
+  | { type: 'result'; label: string; result: TestRunResult }
+  | { type: 'attack'; round: number; total: number; survived: boolean }
+  | { type: 'telemetry'; message: string };
 
 export interface DevSessionOptions {
   feature: string;
@@ -74,6 +82,7 @@ export class DevSession extends EventEmitter {
   };
   private result: TestRunResult | null = null;
   private logs: string[] = [];
+  private events: SessionEvent[] = [];
   private prompt: string | null = null;
   private moduleName: string | null = null;
   private files: SessionFiles = { types: null, impl: null, tests: null, attacks: [] };
@@ -104,6 +113,7 @@ export class DevSession extends EventEmitter {
       statuses: { ...this.statuses },
       result: this.result,
       logs: [...this.logs],
+      events: [...this.events],
       prompt: this.prompt,
       moduleName: this.moduleName,
       files: { ...this.files, attacks: [...this.files.attacks] },
@@ -121,6 +131,12 @@ export class DevSession extends EventEmitter {
     this.logs.push(line);
     if (this.logs.length > 30) this.logs.shift();
     this.emit('log', line);
+    this.emitUpdate();
+  }
+
+  private pushEvent(ev: SessionEvent): void {
+    this.events.push(ev);
+    if (this.events.length > 40) this.events.shift();
     this.emitUpdate();
   }
 
@@ -205,9 +221,10 @@ export class DevSession extends EventEmitter {
     }
   }
 
-  private async runTestsOn(files: string[]): Promise<TestRunResult> {
+  private async runTestsOn(files: string[], label = 'run'): Promise<TestRunResult> {
     const r = await this.execute(this.runner, { files, cwd: this.cwd });
     this.result = r;
+    this.pushEvent({ type: 'result', label, result: r });
     this.emitUpdate();
     return r;
   }
@@ -240,11 +257,13 @@ export class DevSession extends EventEmitter {
         if (this.quitting) break;
         if (!isGreen(outcome.result)) {
           this.log(`Attack round ${round} aborted - suite not green (${outcome.result.passed}/${outcome.result.total} passing)`);
+          this.pushEvent({ type: 'attack', round, total: MAX_ATTACK_ROUNDS, survived: false });
           break;
         }
 
         this.attackRoundsSurvived = round;
         this.log(`Attack round ${round} survived`);
+        this.pushEvent({ type: 'attack', round, total: MAX_ATTACK_ROUNDS, survived: true });
         this.emitUpdate();
 
         if (round < MAX_ATTACK_ROUNDS) {
@@ -294,6 +313,12 @@ export class DevSession extends EventEmitter {
       timeToGreenSeconds,
     }).then((result) => {
       if (result.synced) {
+        this.pushEvent({
+          type: 'telemetry',
+          message:
+            `Synced: streak ${result.currentStreak ?? 0}d, ` +
+            `total green ${result.totalGreenTests ?? 0}`,
+        });
         this.log(
           `Telemetry synced - current streak: ${result.currentStreak ?? 0} days, ` +
             `total green tests: ${result.totalGreenTests ?? 0}`,
@@ -322,6 +347,7 @@ export class DevSession extends EventEmitter {
         attacks: [],
       };
       this.log(`Reusing existing module "src/${nameFromDisk}.ts" - skipping scaffold generation`);
+      this.pushEvent({ type: 'info', message: `Reusing existing module src/${nameFromDisk}.ts` });
       this.setStatuses({ scaffold: 'done' });
       return;
     }
@@ -353,6 +379,10 @@ export class DevSession extends EventEmitter {
       attacks: [],
     };
     this.log(`Contract written: ${this.relative(this.files.types)}, ${this.relative(this.files.impl)}`);
+    this.pushEvent({
+      type: 'write',
+      message: `Contract written: ${this.relative(this.files.types)}, ${this.relative(this.files.impl)}`,
+    });
     this.setStatuses({ scaffold: 'done' });
   }
 
@@ -411,8 +441,9 @@ export class DevSession extends EventEmitter {
       }
       this.files.tests = testPath;
       this.log(`Tests written: ${this.relative(testPath)}`);
+      this.pushEvent({ type: 'write', message: `Tests written: ${this.relative(testPath)}` });
 
-      const r = await this.runTestsOn([testPath]);
+      const r = await this.runTestsOn([testPath], 'RED verify');
       this.log(`${r.total} tests run: ${r.passed} passed, ${r.failed} failed`);
       if (r.failed > 0) {
         this.redEndedAt = Date.now();
@@ -477,7 +508,7 @@ export class DevSession extends EventEmitter {
 
       const run = async (): Promise<void> => {
         try {
-          const r = await this.runTestsOn(files);
+          const r = await this.runTestsOn(files, 'watch');
           if (isGreen(r)) {
             if (this.greenReachedAt === null) this.greenReachedAt = Date.now();
             finish(r, 'green');
@@ -556,8 +587,9 @@ export class DevSession extends EventEmitter {
     fs.writeFileSync(attackPath, value.testFile.trimEnd() + '\n');
     this.files.attacks.push(attackPath);
     this.log(`Attack tests written: ${this.relative(attackPath)}`);
+    this.pushEvent({ type: 'write', message: `Attack tests written: ${this.relative(attackPath)}` });
 
-    const r = await this.runTestsOn([this.files.tests!, ...this.files.attacks]);
+    const r = await this.runTestsOn([this.files.tests!, ...this.files.attacks], `attack ${round}/${MAX_ATTACK_ROUNDS}`);
     this.log(`Attack round ${round} result: ${r.passed}/${r.total} passing`);
   }
 }

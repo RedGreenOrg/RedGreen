@@ -5,6 +5,9 @@ import { getConfigPath } from '../utils/paths.js';
 export const LLM_PROVIDERS = ['openai', 'anthropic', 'gemini', 'ollama', 'stub'] as const;
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
 
+export const THEME_NAMES = ['opencode', 'system'] as const;
+export type ThemeName = (typeof THEME_NAMES)[number];
+
 export const PROVIDER_MODELS: Record<LlmProvider, string> = {
   openai: 'gpt-4o',
   anthropic: 'claude-3-5-sonnet',
@@ -30,6 +33,7 @@ const configSchema = z.object({
   model: z.string().optional(),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
+  theme: z.enum(['opencode', 'system']).optional(),
   supabase: z
     .object({
       url: z.string().optional(),
@@ -81,4 +85,18 @@ export function getApiKey(config: RedGreenConfig): string | undefined {
   if (envVar && process.env[envVar]) return process.env[envVar];
   if (config.apiKey) return deobfuscate(config.apiKey);
   return undefined;
+}
+
+// Patches only the theme key, preserving the raw stored config verbatim
+// (avoids re-obfuscating an already obfuscated apiKey).
+export function updateTheme(theme: ThemeName): void {
+  const p = getConfigPath();
+  let raw: Record<string, unknown> = {};
+  try {
+    if (fs.existsSync(p)) raw = JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown>;
+  } catch {
+    raw = {};
+  }
+  raw.theme = theme;
+  fs.writeFileSync(p, JSON.stringify(raw, null, 2) + '\n');
 }

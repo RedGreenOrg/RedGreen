@@ -6,3 +6,12 @@ dist/
 .env
 .env*.local
 supabase/.temp/
+demo/
+
+fixtures/
+vercui-out.txt
+vercui.tsx
+vercui-raw.tsx
+vercui-replay.tsx
+vercui-ink-raw.txt
+vercui-replay-out.txt
