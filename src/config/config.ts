@@ -1,12 +1,13 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import { getConfigPath } from '../utils/paths.js';
+import { OPENCODE_THEME_NAMES, type OpenCodeThemeName } from '../tui/opencodeThemes.generated.js';
 
 export const LLM_PROVIDERS = ['openai', 'anthropic', 'gemini', 'ollama', 'stub'] as const;
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
 
-export const THEME_NAMES = ['opencode', 'system'] as const;
-export type ThemeName = (typeof THEME_NAMES)[number];
+export const THEME_NAMES: readonly string[] = ['opencode', 'system', ...OPENCODE_THEME_NAMES];
+export type ThemeName = 'opencode' | 'system' | OpenCodeThemeName;
 
 export const PROVIDER_MODELS: Record<LlmProvider, string> = {
   openai: 'gpt-4o',
@@ -33,7 +34,7 @@ const configSchema = z.object({
   model: z.string().optional(),
   baseUrl: z.string().optional(),
   apiKey: z.string().optional(),
-  theme: z.enum(['opencode', 'system']).optional(),
+  theme: z.enum([...THEME_NAMES] as [string, ...string[]]).optional(),
   supabase: z
     .object({
       url: z.string().optional(),

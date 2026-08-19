@@ -2,7 +2,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { loadConfig, type ThemeName } from '../config/config.js';
+import { loadConfig, THEME_NAMES, type ThemeName } from '../config/config.js';
+import {
+  OPENCODE_THEMES,
+  OPENCODE_THEME_NAMES,
+  type OpenCodeThemeJson,
+  type OpenCodeThemeName,
+} from './opencodeThemes.generated.js';
 
 /**
  * Semantic color tokens, modeled after opencode's theme system.
@@ -282,28 +288,76 @@ export function buildSystemTheme(colors: TerminalColors, fallbackBg = DEFAULT_BG
   };
 }
 
+// ---------------------------------------------------------------------------
+// opencode theme assets -> redgreen Theme
+// ---------------------------------------------------------------------------
+
+type OpenCodeColor = string | { dark?: string; light?: string } | undefined;
+
+// Evaluated before THEMES below: the map at module init calls
+// resolveOpenCodeTheme, whose body reads OT_KEYS.
+const OT_KEYS: Array<keyof Theme> = [
+  'primary',
+  'secondary',
+  'accent',
+  'success',
+  'error',
+  'warning',
+  'info',
+  'text',
+  'textMuted',
+  'border',
+  'borderActive',
+  'borderSubtle',
+  'background',
+  'backgroundPanel',
+  'backgroundElement',
+];
+
 export const THEMES: Record<ThemeName, Theme> = {
-  opencode: {
-    primary: '#8b5cf6',
-    secondary: '#60a5fa',
-    accent: '#a78bfa',
-    success: '#4ade80',
-    error: '#f87171',
-    warning: '#fbbf24',
-    info: '#60a5fa',
-    text: '#f0f0f0',
-    textMuted: '#9ca3af',
-    border: '#374151',
-    borderActive: '#8b5cf6',
-    borderSubtle: '#2b2f36',
-    background: '#0d0d0f',
-    backgroundPanel: '#16181d',
-    backgroundElement: '#1c1f26',
-  },
-  // Static fallback until installSystemTheme() swaps in the real values
-  // derived from the terminal (kept small so it never blocks startup).
-  system: buildSystemTheme({ palette: [] }),
+  // All of opencode's bundled TUI themes (assets + `defs` refs + dark/light
+  // variants resolved like opencode's own resolveTheme). "opencode" here is
+  // the real opencode default theme from their repo, not a local sketch.
+  ...Object.fromEntries(
+    OPENCODE_THEME_NAMES.map((name) => [name, resolveOpenCodeTheme(OPENCODE_THEMES[name])]),
+  ) as Record<OpenCodeThemeName, Theme>,
 };
+
+/**
+ * Convert one of opencode's theme JSON assets into a redgreen Theme.
+ * Hex values, `defs`/cross-key references and `{dark, light}` variants are
+ * resolved like opencode's own resolver: the light/dark branch is picked
+ * from the background's luminance once the background is resolved.
+ */
+export function resolveOpenCodeTheme(json: OpenCodeThemeJson): Theme {
+  const defs = json.defs ?? {};
+  const theme = json.theme;
+
+  const resolveValue = (value: OpenCodeColor, mode: 'dark' | 'light', chain: string[]): string | undefined => {
+    if (typeof value === 'object') {
+      return resolveValue(value[mode], mode, chain);
+    }
+    if (typeof value !== 'string') return undefined;
+    const v = value.trim();
+    if (v === 'transparent' || v === 'none') return undefined;
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
+    if (chain.includes(v)) return undefined;
+    const ref = defs[v] ?? (theme[v] as OpenCodeColor | undefined);
+    if (ref === undefined) return undefined;
+    return resolveValue(ref, mode, [...chain, v]);
+  };
+
+  const resolveKey = (key: string, mode: 'dark' | 'light'): string | undefined =>
+    resolveValue(theme[key] as OpenCodeColor, mode, []);
+
+  let mode: 'dark' | 'light' = 'dark';
+  const bgDark = resolveKey('background', 'dark');
+  if (bgDark && luminance(bgDark) > 127.5) mode = 'light';
+
+  const result: Partial<Theme> = {};
+  for (const key of OT_KEYS) result[key] = resolveKey(key, mode);
+  return result as Theme;
+}
 
 /**
  * Query the terminal and swap THEMES.system in place. Called once at TUI
@@ -353,9 +407,9 @@ export async function installSystemTheme(): Promise<void> {
 
 export function resolveThemeName(): ThemeName {
   const env = process.env.REDGREEN_THEME;
-  if (env === 'opencode' || env === 'system') return env;
+  if (env && THEME_NAMES.includes(env)) return env as ThemeName;
   const { config } = loadConfig();
-  if (config?.theme === 'opencode' || config?.theme === 'system') return config.theme;
+  if (config?.theme && THEME_NAMES.includes(config.theme)) return config.theme;
   return 'opencode';
 }
 
