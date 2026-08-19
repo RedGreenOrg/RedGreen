@@ -12,8 +12,10 @@ import {
 
 /**
  * Semantic color tokens, modeled after opencode's theme system.
- * - "opencode" (default): fixed hex palette, emitted as truecolor.
- *   Looks identical in every terminal that supports 24-bit color.
+ * - "opencode" and the bundled opencode theme names: resolved from the real
+ *   opencode theme assets. Each asset carries `{dark, light}` variants; which
+ *   one is used follows the terminal's color scheme, exactly like opencode
+ *   (its terminalMode() reads the terminal's default background).
  * - "system": terminal-aware adaptation. Background/panels/text are derived
  *   from the terminal's actual colors (OSC queries, falling back to the
  *   COLORFGBG env var that Windows terminals set), while accents keep the
@@ -294,6 +296,22 @@ export function buildSystemTheme(colors: TerminalColors, fallbackBg = DEFAULT_BG
 
 type OpenCodeColor = string | { dark?: string; light?: string } | undefined;
 
+// Which `{dark, light}` variant branch of the opencode assets to use.
+// opencode decides this from the terminal's color scheme (its terminalMode()
+// reads the terminal's default background); redgreen mirrors that with the
+// same signals used for the system theme (COLORFGBG, falling back to the OS
+// theme). installSystemTheme re-refines the choice once the OSC-reported
+// background is known. REDGREEN_THEME_MODE=dark|light overrides it for
+// deterministic setups.
+let opencodeMode: 'dark' | 'light' = 'dark';
+
+function detectOpenCodeMode(): 'dark' | 'light' {
+  const override = process.env.REDGREEN_THEME_MODE;
+  if (override === 'dark' || override === 'light') return override;
+  const bg = envTerminalColors().defaultBackground ?? systemBgFallback();
+  return luminance(bg) < 127.5 ? 'dark' : 'light';
+}
+
 // Evaluated before THEMES below: the map at module init calls
 // resolveOpenCodeTheme, whose body reads OT_KEYS.
 const OT_KEYS: Array<keyof Theme> = [
@@ -314,22 +332,30 @@ const OT_KEYS: Array<keyof Theme> = [
   'backgroundElement',
 ];
 
+opencodeMode = detectOpenCodeMode();
+
 export const THEMES: Record<ThemeName, Theme> = {
   // All of opencode's bundled TUI themes (assets + `defs` refs + dark/light
   // variants resolved like opencode's own resolveTheme). "opencode" here is
   // the real opencode default theme from their repo, not a local sketch.
   ...Object.fromEntries(
-    OPENCODE_THEME_NAMES.map((name) => [name, resolveOpenCodeTheme(OPENCODE_THEMES[name])]),
+    OPENCODE_THEME_NAMES.map((name) => [
+      name,
+      resolveOpenCodeTheme(OPENCODE_THEMES[name], opencodeMode),
+    ]),
   ) as Record<OpenCodeThemeName, Theme>,
 };
 
 /**
  * Convert one of opencode's theme JSON assets into a redgreen Theme.
  * Hex values, `defs`/cross-key references and `{dark, light}` variants are
- * resolved like opencode's own resolver: the light/dark branch is picked
- * from the background's luminance once the background is resolved.
+ * resolved like opencode's own resolveTheme; the variant branch is chosen by
+ * the terminal's color scheme (see opencodeMode above), which is exactly how
+ * opencode decides (its terminalMode() reads the terminal's default
+ * background). `mode` defaults to 'dark' so the function stays total; the
+ * caller (THEMES init / installSystemTheme) always passes the detected mode.
  */
-export function resolveOpenCodeTheme(json: OpenCodeThemeJson): Theme {
+export function resolveOpenCodeTheme(json: OpenCodeThemeJson, mode: 'dark' | 'light' = 'dark'): Theme {
   const defs = json.defs ?? {};
   const theme = json.theme;
 
@@ -349,10 +375,6 @@ export function resolveOpenCodeTheme(json: OpenCodeThemeJson): Theme {
 
   const resolveKey = (key: string, mode: 'dark' | 'light'): string | undefined =>
     resolveValue(theme[key] as OpenCodeColor, mode, []);
-
-  let mode: 'dark' | 'light' = 'dark';
-  const bgDark = resolveKey('background', 'dark');
-  if (bgDark && luminance(bgDark) > 127.5) mode = 'light';
 
   const result: Partial<Theme> = {};
   for (const key of OT_KEYS) result[key] = resolveKey(key, mode);
@@ -379,6 +401,20 @@ export async function installSystemTheme(): Promise<void> {
   };
   const fallback = systemBgFallback();
   THEMES.system = buildSystemTheme(colors, fallback);
+  // Re-pick the opencode assets' light/dark branch from the refined
+  // background (OSC replies beat COLORFGBG emptiness, registry fallback).
+  // REDGREEN_THEME_MODE stays authoritative when set.
+  const finalBg = colors.defaultBackground ?? colors.palette[0] ?? fallback;
+  const override = process.env.REDGREEN_THEME_MODE;
+  opencodeMode =
+    override === 'light' || override === 'dark'
+      ? override
+      : luminance(finalBg) < 127.5
+        ? 'dark'
+        : 'light';
+  for (const name of OPENCODE_THEME_NAMES) {
+    THEMES[name] = resolveOpenCodeTheme(OPENCODE_THEMES[name], opencodeMode);
+  }
   if (process.env.REDGREEN_DEBUG_COLORS === '1') {
     const line = JSON.stringify({
       ts: new Date().toISOString(),

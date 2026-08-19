@@ -282,11 +282,13 @@ export function ThemesOverlay({
   theme,
   onSelect,
   onClose,
+  maxRows,
 }: {
   themeName: ThemeName;
   theme: Theme;
   onSelect: (name: ThemeName) => void;
   onClose: () => void;
+  maxRows: number;
 }): React.ReactElement {
   const [sel, setSel] = useState<number>(() => Math.max(0, THEME_NAMES.indexOf(themeName)));
   useInput((input, key) => {
@@ -298,8 +300,16 @@ export function ThemesOverlay({
     if (input === 'j' || key.downArrow) setSel((v) => Math.min(THEME_NAMES.length - 1, v + 1));
     if (input === 'k' || key.upArrow) setSel((v) => Math.max(0, v - 1));
   });
+  // The box must fit the viewport: the list scrolls through a window and the
+  // selection stays centered in it (a 35-entry list in a 24-row terminal
+  // used to overflow and force a giant full-frame repaint per keystroke).
+  const count = THEME_NAMES.length;
+  const viewHeight = Math.min(count, Math.max(2, maxRows - 8));
+  const viewStart = Math.max(0, Math.min(sel - Math.floor(viewHeight / 2), count - viewHeight));
+  const visible = THEME_NAMES.slice(viewStart, viewStart + viewHeight);
   const fill = theme.backgroundElement;
-  const hintLine = 'enter apply · esc close';
+  const scrollable = count > viewHeight;
+  const hintLine = `enter apply · esc close${scrollable ? ` · ${sel + 1}/${count}` : ''}`;
   const cw = Math.max(2 + 6, ...THEME_NAMES.map((n) => 2 + 2 + n.length + 2), 2 + hintLine.length) + 1;
   const tail = (contentLen: number): React.ReactElement => (
     <>
@@ -317,13 +327,14 @@ export function ThemesOverlay({
       </Text>
       {tail(2 + 6)}
       {'\n'}
-      {THEME_NAMES.map((name, i) => {
+      {visible.map((name, i) => {
+        const index = viewStart + i;
         const current = name === themeName;
         return (
           <Text key={name}>
             {pad(2)}
-            <Text bold color={i === sel ? theme.primary : theme.textMuted}>
-              {i === sel ? '>' : ' '} {name}
+            <Text bold color={index === sel ? theme.primary : theme.textMuted}>
+              {index === sel ? '>' : ' '} {name}
             </Text>
             {current ? <Text color={theme.success}> *</Text> : null}
             {tail(2 + 2 + name.length + (current ? 2 : 0))}
@@ -364,11 +375,17 @@ export function PhaseTui({ feature, runner, chat, cwd, provider }: PhaseTuiProps
   const [elapsed, setElapsed] = useState(0);
   const [clock, setClock] = useState(() => new Date().toTimeString().slice(0, 8));
   const statusTimer = useRef<NodeJS.Timeout | null>(null);
+  // While an overlay (help/themes) is up, freeze background churn (clock
+  // tick, session updates): each setState there repaints the whole frame,
+  // which is what flickers/lags when browsing a large list.
+  const overlayRef = useRef(false);
+  overlayRef.current = showHelp || showThemes;
 
   useEffect(() => {
     if (!sessionRef.current) return;
     const s = sessionRef.current;
     const onUpdate = (sn: SessionSnapshot) => {
+      if (overlayRef.current) return;
       setSnap(sn);
       setScroll(0);
     };
@@ -377,6 +394,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider }: PhaseTuiProps
     s.on('finish', onFinish);
     void s.start();
     const timer = setInterval(() => {
+      if (overlayRef.current) return;
       setElapsed(Date.now() - startedAtRef.current);
       setClock(new Date().toTimeString().slice(0, 8));
     }, 1000);
@@ -748,6 +766,7 @@ return (
           <ThemesOverlay
             themeName={themeName}
             theme={theme}
+            maxRows={rows}
             onSelect={(name) => {
               setThemeName(name);
               updateTheme(name);
