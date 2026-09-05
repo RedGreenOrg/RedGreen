@@ -138,7 +138,7 @@ Tests run against temp dirs and never touch your real config.
 
 ## Roadmap
 
-- [ ] Public npm release (`npm publish`)
+- [x] Public npm release — live at [npmjs.com/package/redgreen](https://www.npmjs.com/package/redgreen) (`redgreen@0.1.0`)
 - [x] Custom prompt rules via `.redgreen.json`
 - [x] Local session memory for longer, multi-feature context
 - [x] More runner support (vitest, jest, mocha, node:test)

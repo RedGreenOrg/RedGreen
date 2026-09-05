@@ -7,7 +7,7 @@ import { runPhaseTui } from '../tui/PhaseTui.js';
 import { isInteractive, runHeadlessDev } from '../tui/nonInteractive.js';
 
 export const devCommand = new Command('dev')
-  .description('Start the 4-phase interactive TDD loop for a feature')
+  .description('Start the red → green → attack → refactor TDD loop for a feature')
   .argument('<feature>', 'feature description')
   .action(async (feature: string) => {
     let { config } = loadConfig();
