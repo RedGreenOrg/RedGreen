@@ -6,12 +6,16 @@ import type { ChatFn } from '../llm/client.js';
 import { completeStructured } from '../llm/structured.js';
 import {
   ATTACK_SCHEMA,
+  HINTS_SCHEMA,
   RED_SCHEMA,
+  REFACTOR_APPLY_SCHEMA,
   REFACTOR_SCHEMA,
   SCAFFOLD_SCHEMA,
   SOLUTION_SCHEMA,
   buildAttackPrompt,
+  buildNudgePrompt,
   buildRedPrompt,
+  buildRefactorApplyPrompt,
   buildRefactorPrompt,
   buildScaffoldPrompt,
   buildSolutionPrompt,
@@ -54,6 +58,8 @@ export interface SessionSnapshot {
   finalGreen: boolean;
   hints: Hints | null;
   hintUnlocks: Record<HintTier, boolean>;
+  /** How many times the hint tiers were re-derived for a new failing assertion. */
+  nudgesRegenerated: number;
   greenFailures: number;
   greenReached: boolean;
   solution: string | null;
@@ -62,6 +68,10 @@ export interface SessionSnapshot {
   refactor: RefactorSuggestions | null;
   /** Whether the refactor phase ran to completion. */
   refactorDone: boolean;
+  /** A test-verified refactor is on disk, awaiting accept (`a`) or reject (`r`). */
+  refactorPending: boolean;
+  /** Number of auto-apply refactors the developer accepted. */
+  refactorAccepted: number;
   /** Non-null while an AI step failed and the session is paused awaiting retry. */
   recoverableError: string | null;
   /** Last failure of reference-solution generation (independent of the pipeline). */
@@ -89,6 +99,11 @@ export interface DevSessionOptions {
   retryAttempts?: number;
   /** Base delay for exponential backoff between AI retries, in ms (default 1500). */
   retryBaseDelayMs?: number;
+  /**
+   * Run the refactor phase without approval and auto-accept every suite-verified
+   * suggestion (default: REDGREEN_REFACTOR env var, off unless set to 1/true).
+   */
+  refactorEnabled?: boolean;
   /** Include contract-explaining JSDoc on stub functions (default: true). */
   stubComments?: boolean;
 }
@@ -109,6 +124,13 @@ type StepOutcome =
 function resolveRetryAttempts(): number {
   const parsed = Number(process.env.REDGREEN_LLM_RETRIES);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.min(5, Math.floor(parsed)) : 2;
+}
+
+// REDGREEN_REFACTOR=1 runs the refactor phase (and auto-applies every
+// suite-verified suggestion) without human approval - the CI-friendly path.
+function resolveRefactorEnabled(): boolean {
+  const raw = process.env.REDGREEN_REFACTOR;
+  return raw === '1' || raw?.toLowerCase() === 'true';
 }
 
 function formatDuration(ms: number): string {
@@ -147,6 +169,10 @@ export class DevSession extends EventEmitter {
   private redEndedAt: number | null = null;
   private greenReachedAt: number | null = null;
   private hints: Hints | null = null;
+  // The failing-assertion signature the current hints were minted against.
+  private hintsTarget: string | null = null;
+  private nudgesRegenerated = 0;
+  private nugging = false;
   private solution: string | null = null;
   private solutionExplanation: string | null = null;
   private greenFailures = 0;
@@ -154,9 +180,13 @@ export class DevSession extends EventEmitter {
   private generation = 0;
   private refactor: RefactorSuggestions | null = null;
   private refactorDone = false;
+  private refactorProposal: { filePath: string; original: string; proposed: string; result: TestRunResult } | null = null;
+  private refactorAccepted = 0;
+  private busyRefactor = false;
 
   private readonly retryAttempts: number;
   private readonly retryBaseDelayMs: number;
+  private readonly refactorEnabled: boolean;
   private recoverableError: string | null = null;
   private solutionError: string | null = null;
   private pipelineStep = 0;
@@ -190,6 +220,7 @@ export class DevSession extends EventEmitter {
     this.greenTimeoutMs = opts.greenTimeoutMs ?? null;
     this.retryAttempts = opts.retryAttempts ?? resolveRetryAttempts();
     this.retryBaseDelayMs = opts.retryBaseDelayMs ?? 1500;
+    this.refactorEnabled = opts.refactorEnabled ?? resolveRefactorEnabled();
     this.stubComments = opts.stubComments ?? true;
     this.memory = new SessionMemory(this.cwd);
     this.loadRules();
@@ -241,12 +272,15 @@ export class DevSession extends EventEmitter {
         medium: this.hintUnlocked('medium'),
         big: this.hintUnlocked('big'),
       },
+      nudgesRegenerated: this.nudgesRegenerated,
       greenFailures: this.greenFailures,
       greenReached: this.greenReachedAt !== null,
       solution: this.solution,
       solutionExplanation: this.solutionExplanation,
       refactor: this.refactor,
       refactorDone: this.refactorDone,
+      refactorPending: this.refactorProposal !== null,
+      refactorAccepted: this.refactorAccepted,
       recoverableError: this.recoverableError,
       solutionError: this.solutionError,
     };
@@ -309,13 +343,87 @@ export class DevSession extends EventEmitter {
     return this.greenFailures >= 2;
   }
 
-  revealHint(tier: HintTier): string | null {
+  async revealHint(tier: HintTier): Promise<string | null> {
+    if (!this.hints) return null;
+    if (!this.hintUnlocked(tier)) return null;
+    if (this.greenReachedAt === null) {
+      await this.refreshNudges();
+    }
     const hint = this.hints?.[tier];
     if (!hint) return null;
-    if (!this.hintUnlocked(tier)) return null;
     this.log(`Hint (${tier}) revealed`);
     this.pushEvent({ type: 'info', message: `Hint (${tier}) revealed` });
     return hint;
+  }
+
+  /**
+   * Re-derives the small/medium/big nudge tiers against the CURRENT failing
+   * assertion when the developer is still stuck on GREEN and the failure
+   * surface has changed since the hints were minted (or last regenerated).
+   * No-op when GREEN is reached, the failure is unchanged, or a regeneration
+   * is already in flight.
+   */
+  async refreshNudges(): Promise<boolean> {
+    if (this.nugging) return false;
+    if (this.greenReachedAt !== null) return false;
+    const current = this.failureSignature();
+    if (!current || current === this.hintsTarget) return false;
+
+    this.nugging = true;
+    this.log('Failure changed - regenerating nudges for the current assertion...');
+    this.emitUpdate();
+    try {
+      const { value } = await this.chatWithBackoff('Nudge', () =>
+        completeStructured({
+          chat: this.chat,
+          debugTag: 'nudge',
+          schema: HINTS_SCHEMA,
+          ...buildNudgePrompt({
+            feature: this.feature,
+            runner: this.runner,
+            moduleName: this.moduleName ?? moduleNameFromFeature(this.feature),
+            typesPath: this.relative(this.files.types),
+            implPath: this.relative(this.files.impl),
+            typesContent: this.readFileSafe(this.files.types ?? ''),
+            implContent: this.readFileSafe(this.files.impl ?? ''),
+            failingAssertions: this.describeFailures(),
+            customRules: this.customRules,
+          }),
+        }),
+      );
+      this.hints = value;
+      this.hintsTarget = current;
+      this.nudgesRegenerated += 1;
+      this.log('Nudges regenerated - now targeting the current failure');
+      this.pushEvent({
+        type: 'info',
+        message: 'Nudges regenerated - hints now target the current failure',
+      });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log(`Nudge regeneration failed: ${msg}`);
+      this.pushEvent({ type: 'error', message: 'Nudge regeneration failed' });
+      return false;
+    } finally {
+      this.nugging = false;
+      this.emitUpdate();
+    }
+  }
+
+  private failureSignature(): string {
+    const r = this.result;
+    if (!r || r.failures.length === 0) return '';
+    return r.failures
+      .map((f) => `${f.title}\u0000${f.message}`)
+      .sort()
+      .join('\n');
+  }
+
+  private describeFailures(): string {
+    const r = this.result;
+    if (!r || r.failures.length === 0) return '(suite currently green or no result)';
+    return r.failures.map((f, i) => `${i + 1}. ${f.title}\n   ${f.message}`).join('\n');
   }
 
   async requestSolution(): Promise<void> {
@@ -389,11 +497,17 @@ export class DevSession extends EventEmitter {
     this.redEndedAt = null;
     this.greenReachedAt = null;
     this.hints = null;
+    this.hintsTarget = null;
+    this.nudgesRegenerated = 0;
+    this.nugging = false;
     this.solution = null;
     this.solutionExplanation = null;
     this.greenFailures = 0;
     this.refactor = null;
     this.refactorDone = false;
+    this.refactorProposal = null;
+    this.refactorAccepted = 0;
+    this.busyRefactor = false;
     // NOTE: forceFreshScaffold is intentionally NOT reset here - restart()
     // sets it before calling resetState so the next scaffold skips reuse.
     this.recoverableError = null;
@@ -612,6 +726,33 @@ export class DevSession extends EventEmitter {
     }
     if (this.quitting) return 'finish-failed';
     if (!redOk) this.log('Warning: could not establish RED - tests passed against the stub');
+    return this.stepTestReview(redOk);
+  }
+
+  /**
+   * TiCoder-style intent gate: once the suite is confirmed RED, pause and let
+   * the developer review (or adjust) the generated tests before any
+   * implementation exists. The tests ARE the formalized intent - validating
+   * them here prevents a full implementation cycle built on a misread.
+   */
+  private async stepTestReview(redOk: boolean): Promise<StepOutcome> {
+    if (this.headless || this.resumedWithTests || !redOk || !this.files.tests) return 'continue';
+    this.setPrompt(
+      'Tests are RED - they encode your intent · v to view them · enter to start GREEN · q quit',
+    );
+    const choice = await this.wait(null);
+    if (choice === 'quit') return 'finish-failed';
+    if (choice !== 'approve') {
+      this.log('Proceeding without reviewing the RED tests');
+      return 'continue';
+    }
+    // The developer may have edited the tests while reviewing - re-establish RED.
+    const r = await this.runTestsOn([this.files.tests!], 'RED re-verify');
+    if (r.failed > 0) {
+      this.log(`${r.total} tests run: ${r.passed} passed - still RED as expected`);
+    } else {
+      this.log('Warning: the suite no longer starts RED after your test edits');
+    }
     return 'continue';
   }
 
@@ -666,8 +807,8 @@ export class DevSession extends EventEmitter {
   }
 
   private async stepRefactor(): Promise<StepOutcome> {
-    // Interactive edit phase - pointless headlessly and meaningless without GREEN.
-    if (this.headless) return 'continue';
+    // Interactive edit phase - pointless headlessly unless REDGREEN_REFACTOR opts in.
+    if (this.headless && !this.refactorEnabled) return 'continue';
     if (!this.finalStatusWasGreen()) {
       this.log('Refactor phase skipped - suite is not green');
       this.pushEvent({ type: 'info', message: 'Refactor phase skipped (suite not green)' });
@@ -681,14 +822,53 @@ export class DevSession extends EventEmitter {
     }
     if (this.quitting) return 'finish-current';
 
+    if (this.refactorEnabled) {
+      // Unattended mode: verify and auto-accept every suggestion, no approval.
+      await this.runAutoRefactor();
+      return 'continue';
+    }
+
     const outcome = await this.watchRefactorEdits();
     if (outcome.choice === 'quit') return 'finish-current';
 
     this.refactorDone = true;
     const green = isGreen(outcome.result);
-    this.log(green ? 'Refactor complete - tests still green' : 'Refactor complete (tests not green)');
+    this.log(
+      green
+        ? this.refactorAccepted > 0
+          ? `Refactor complete - tests still green (${this.refactorAccepted} applied)`
+          : 'Refactor complete - tests still green'
+        : 'Refactor complete (tests not green)',
+    );
     this.setStatuses({ refactor: green ? 'done' : 'error' });
     return 'continue';
+  }
+
+  /**
+   * Unattended refactoring (REDGREEN_REFACTOR): walks every suggestion through
+   * the suite-verified auto-apply and accepts it on GREEN. A suggestion that
+   * breaks a test is rejected (file restored) and the loop moves on.
+   */
+  private async runAutoRefactor(): Promise<void> {
+    const count = this.refactor?.suggestions.length ?? 0;
+    while (this.refactorAccepted < count) {
+      if (this.finished || this.quitting) return;
+      await this.applyRefactor();
+      // A pending proposal means GREEN - accept it; otherwise the apply was
+      // rejected or failed and the file was already restored - move on.
+      if (!this.refactorProposal) break;
+      this.acceptRefactorProposal();
+    }
+    this.refactorDone = true;
+    const green = isGreen(this.result ?? this.emptyResult());
+    this.log(
+      green
+        ? this.refactorAccepted > 0
+          ? `Refactor complete - tests still green (${this.refactorAccepted} applied)`
+          : 'Refactor complete - tests still green'
+        : 'Refactor complete (tests not green)',
+    );
+    this.setStatuses({ refactor: green ? 'done' : 'error' });
   }
 
   private async runRefactorRound(): Promise<void> {
@@ -726,6 +906,121 @@ export class DevSession extends EventEmitter {
     this.emitUpdate();
   }
 
+  private refactorWatchPrompt(): string {
+    return 'Refactor freely - re-runs on save · a auto-apply · enter done · q quit';
+  }
+
+  /**
+   * Auto-applies a refactor suggestion the safe way: the AI produces the full
+   * candidate implementation, RedGreen runs the test suite against it, and the
+   * candidate only enters the workspace on GREEN. A red (or failed) attempt is
+   * reverted automatically. The developer still keeps final say: a verified
+   * proposal awaits `a` (accept) or `r` (reject).
+   */
+  async applyRefactor(): Promise<void> {
+    if (this.refactorProposal) {
+      this.acceptRefactorProposal();
+      return;
+    }
+    if (!this.refactor || this.refactor.suggestions.length === 0 || this.finished || this.busyRefactor) return;
+
+    const idx = Math.min(this.refactorAccepted, this.refactor.suggestions.length - 1);
+    const suggestion = this.refactor.suggestions[idx];
+    this.busyRefactor = true;
+    this.setPrompt(`Applying "${suggestion.title}" - verifying against the suite...`);
+    try {
+      const implPath = this.files.impl;
+      if (!implPath) return;
+      const original = this.readFileSafe(implPath);
+
+      const { value } = await this.chatWithBackoff('Refactor apply', () =>
+        completeStructured({
+          chat: this.chat,
+          debugTag: 'refactor-apply',
+          schema: REFACTOR_APPLY_SCHEMA,
+          ...buildRefactorApplyPrompt({
+            feature: this.feature,
+            runner: this.runner,
+            moduleName: this.moduleName ?? moduleNameFromFeature(this.feature),
+            typesPath: this.relative(this.files.types),
+            implPath: this.relative(implPath),
+            typesContent: this.readFileSafe(this.files.types ?? ''),
+            implContent: original,
+            testsContent: [this.files.tests, ...this.files.attacks]
+              .filter((f): f is string => Boolean(f))
+              .map((f) => this.readFileSafe(f))
+              .join('\n\n'),
+            customRules: this.customRules,
+            suggestion,
+          }),
+        }),
+      );
+
+      fs.writeFileSync(implPath, value.code.trimEnd() + '\n');
+      const cascadeFiles = [this.files.tests, ...this.files.attacks].filter(
+        (f): f is string => Boolean(f),
+      );
+      const r = await this.runTestsOn(cascadeFiles, `refactor "${suggestion.title}"`);
+
+      if (isGreen(r)) {
+        this.refactorProposal = { filePath: implPath, original, proposed: value.code, result: r };
+        this.log(`Refactor applied & verified GREEN (${r.passed}/${r.total}) - press a to accept, r to reject`);
+        this.pushEvent({ type: 'refactor', message: `"${suggestion.title}" verified green - a accept · r reject` });
+        this.setPrompt('Refactor verified GREEN · a accept · r reject');
+      } else {
+        fs.writeFileSync(implPath, original);
+        this.log(`Refactor rejected - suite went red (${r.failed} failing), restoring your file`);
+        this.pushEvent({ type: 'refactor', message: `"${suggestion.title}" rejected - broke ${r.failed} test(s), reverted` });
+        const revert = await this.runTestsOn(cascadeFiles, 'refactor revert');
+        this.log(isGreen(revert) ? 'Restored implementation confirmed GREEN' : `Restored suite left red (${revert.passed}/${revert.total})`);
+        this.setPrompt(this.refactorWatchPrompt());
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log(`Refactor apply failed: ${msg} - your file was not touched`);
+      this.pushEvent({ type: 'error', message: 'Refactor apply failed - your file was not touched' });
+      this.setPrompt(this.refactorWatchPrompt());
+    } finally {
+      this.busyRefactor = false;
+      this.emitUpdate();
+    }
+  }
+
+  /** Keeps the verified proposal on disk and counts it as an applied refactor. */
+  acceptRefactorProposal(): boolean {
+    if (!this.refactorProposal || this.finished) return false;
+    this.refactorProposal = null;
+    this.refactorAccepted += 1;
+    this.log(`Refactor accepted (${this.refactorAccepted} applied) - suite stayed green`);
+    this.pushEvent({ type: 'refactor', message: `Refactor accepted - ${this.refactorAccepted} applied` });
+    this.setPrompt(this.refactorWatchPrompt());
+    this.emitUpdate();
+    return true;
+  }
+
+  /** Reverts the proposal, restores the original file, and re-verifies GREEN. */
+  async rejectRefactorProposal(): Promise<boolean> {
+    const p = this.refactorProposal;
+    if (!p || this.finished) return false;
+    fs.writeFileSync(p.filePath, p.original);
+    this.refactorProposal = null;
+    this.log('Refactor rejected - restoring your implementation and re-verifying');
+    this.pushEvent({ type: 'refactor', message: 'Refactor rejected - restored your implementation' });
+    this.setPrompt(this.refactorWatchPrompt());
+    this.emitUpdate();
+    this.busyRefactor = true;
+    try {
+      const r = await this.runTestsOn(
+        [this.files.tests, ...this.files.attacks].filter((f): f is string => Boolean(f)),
+        'refactor revert',
+      );
+      this.log(isGreen(r) ? 'Restored implementation confirmed GREEN' : `Restored suite left red (${r.passed}/${r.total})`);
+    } finally {
+      this.busyRefactor = false;
+    }
+    return true;
+  }
+
   private watchRefactorEdits(): Promise<{ result: TestRunResult; choice: WaitChoice }> {
     return new Promise((resolve) => {
       const targets = [this.files.impl!, ...(this.files.types ? [this.files.types!] : [])].filter(
@@ -747,6 +1042,7 @@ export class DevSession extends EventEmitter {
       };
 
       const run = async (): Promise<void> => {
+        if (this.busyRefactor) return;
         try {
           const r = await this.runTestsOn(files, 'refactor');
           if (isGreen(r)) {
@@ -764,7 +1060,7 @@ export class DevSession extends EventEmitter {
         debounce = setTimeout(() => void run(), 300);
       });
 
-      this.setPrompt('Refactor freely - RedGreen re-runs on each save · enter done · q quit');
+      this.setPrompt(this.refactorWatchPrompt());
       void this.wait(null).then((choice) => finish(choice));
     });
   }
@@ -804,7 +1100,7 @@ export class DevSession extends EventEmitter {
       finalGreen ? 'GREEN' : 'not green',
       r ? `${r.passed}/${r.total} passing` : 'no test run',
       `attacks ${this.attackRoundsSurvived}/${MAX_ATTACK_ROUNDS}`,
-      `refactor ${this.refactorDone ? 'done' : '-'}`,
+      `refactor ${this.refactorDone ? (this.refactorAccepted > 0 ? `done, ${this.refactorAccepted} applied` : 'done') : '-'}`,
     ];
     const ttg = this.timeToGreenSeconds();
     if (ttg !== null) bits.push(`green in ${formatDuration(ttg * 1000)}`);
@@ -960,6 +1256,7 @@ export class DevSession extends EventEmitter {
       this.log(`${r.total} tests run: ${r.passed} passed, ${r.failed} failed`);
       if (r.failed > 0) {
         this.redEndedAt = Date.now();
+        this.hintsTarget = this.failureSignature();
         this.log(`RED confirmed - suite is failing as expected`);
         this.setStatuses({ red: 'done' });
         return true;

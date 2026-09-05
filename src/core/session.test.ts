@@ -199,9 +199,66 @@ test('hints are gated by failed edits while GREEN is not reached', async () => {
   assert.equal(snap.hintUnlocks.small, true);
   assert.equal(snap.hintUnlocks.medium, false);
   assert.equal(snap.hintUnlocks.big, false);
-  assert.equal(session.revealHint('small'), 'one-liner');
-  assert.equal(session.revealHint('medium'), null);
-  assert.equal(session.revealHint('big'), null);
+  assert.equal(await session.revealHint('small'), 'one-liner');
+  assert.equal(await session.revealHint('medium'), null);
+  assert.equal(await session.revealHint('big'), null);
+});
+
+test('nudges regenerate against the current failing assertion', async () => {
+  const cwd = tempProject();
+  const chat: ChatFn = async (turn) => {
+    const user = turn.user ?? '';
+    if (user.includes('REDGREEN:TASK=scaffold')) return SCAFFOLD;
+    if (user.includes('REDGREEN:TASK=attack')) return JSON.stringify({ testFile: ATTACK_TESTS });
+    if (user.includes('REDGREEN:TASK=nudge')) {
+      return JSON.stringify({
+        small: 'fresh-small',
+        medium: 'fresh-medium',
+        big: 'fresh-big',
+      });
+    }
+    return JSON.stringify({ testFile: RED_TESTS, hints: { small: 'stale', medium: 'stale', big: 'stale' } });
+  };
+  let runs = 0;
+  const executor: TestExecutor = async (runner) => {
+    runs += 1;
+    const failures =
+      runs === 1
+        ? [{ title: 'is red', message: 'Not implemented', file: '' }]
+        : [{ title: 'boundary over max', message: 'off by one', file: '' }];
+    return {
+      runner,
+      passed: 0,
+      failed: 1,
+      skipped: 0,
+      total: 1,
+      failures,
+      durationMs: 10,
+      rawOutput: '',
+    };
+  };
+
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat,
+    execute: executor,
+    headless: true,
+    greenTimeoutMs: 20,
+    cwd,
+  });
+  await session.start();
+
+  let snap = session.snapshot();
+  assert.equal(snap.greenReached, false);
+  assert.equal(snap.hints?.small, 'stale');
+  assert.equal(snap.nudgesRegenerated, 0);
+
+  assert.equal(await session.revealHint('small'), 'fresh-small');
+  snap = session.snapshot();
+  assert.equal(snap.hints?.small, 'fresh-small');
+  assert.equal(snap.nudgesRegenerated, 1);
+  assert.ok(snap.logs.some((l) => l.includes('regenerating nudges')));
 });
 
 test('solution stays locked until GREEN, then generates', async () => {
@@ -583,14 +640,45 @@ const REFACTOR_RESPONSE = JSON.stringify({
   ],
 });
 
+const REFACTOR_APPLY_RESPONSE = JSON.stringify({
+  filePath: 'src/rateLimiter.ts',
+  code:
+    "import type { RateLimiter } from './rateLimiter.types';\n" +
+    "export function createRateLimiter(): RateLimiter {\n" +
+    "  const prune = (): void => {};\n" +
+    "  return { check(key: string): boolean { return prune(); } };\n" +
+    "}",
+});
+
 function refactorChat(): ChatFn {
   return async (turn) => {
     const user = turn.user ?? '';
     if (user.includes('REDGREEN:TASK=scaffold')) return SCAFFOLD;
+    if (user.includes('REDGREEN:TASK=refactor-apply')) return REFACTOR_APPLY_RESPONSE;
     if (user.includes('REDGREEN:TASK=refactor')) return REFACTOR_RESPONSE;
     if (user.includes('REDGREEN:TASK=attack')) return JSON.stringify({ testFile: ATTACK_TESTS });
     return JSON.stringify({ testFile: RED_TESTS });
   };
+}
+
+async function waitFor(pred: () => boolean, timeoutMs = 8000): Promise<void> {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+// Drives the interactive pipeline through contract review + attack rounds but
+// leaves the refactor watch phase pending until the test drives it manually.
+function refactorWatchDriver(session: DevSession): NodeJS.Timeout {
+  return setInterval(() => {
+    const p = session.snapshot().prompt ?? '';
+    if (p.includes('Refactor freely')) return;
+    if (p.includes('approve') || p.includes('another attack') || p.includes('Tests are RED')) {
+      session.approve();
+    }
+  }, 5);
 }
 
 test('runs the refactor phase interactively: AI suggestions then a green watch', async () => {
@@ -611,7 +699,7 @@ test('runs the refactor phase interactively: AI suggestions then a green watch',
     const s = session.snapshot();
     if (s.finished) return;
     const p = s.prompt ?? '';
-    if (p.includes('approve') || p.includes('Refactor freely') || p.includes('another attack')) {
+    if (p.includes('approve') || p.includes('Refactor freely') || p.includes('another attack') || p.includes('Tests are RED')) {
       session.approve();
     }
   }, 5);
@@ -635,7 +723,44 @@ test('runs the refactor phase interactively: AI suggestions then a green watch',
   assert.ok(summaryEv.message.includes('refactor done'));
 });
 
-test('refactor phase is skipped in headless mode', async () => {
+test('RED test-review gate verifies intent before GREEN (TiCoder)', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green']),
+    headless: false,
+    greenTimeoutMs: 500,
+    cwd,
+  });
+
+  // Approve every interactive gate, including the RED test review and the
+  // refactor watch itself, so the full cycle completes.
+  const timer = setInterval(() => {
+    const s = session.snapshot();
+    if (s.finished) return;
+    const p = s.prompt ?? '';
+    if (p.includes('approve') || p.includes('another attack') || p.includes('Tests are RED') || p.includes('Refactor freely')) {
+      session.approve();
+    }
+  }, 5);
+  try {
+    await session.start();
+  } finally {
+    clearInterval(timer);
+    session.dispose();
+  }
+
+  const snap: SessionSnapshot = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.finalGreen, true);
+  // The gate asked the developer to review the tests AND re-verified RED.
+  assert.ok(snap.events.some((e) => e.type === 'result' && e.label === 'RED re-verify'));
+  assert.ok(snap.logs.join('\n').includes('still RED as expected'));
+});
+
+test('RED test-review gate is skipped headlessly', async () => {
   const cwd = tempProject();
   const session = new DevSession({
     feature: 'Build a rate limiter',
@@ -655,6 +780,126 @@ test('refactor phase is skipped in headless mode', async () => {
   assert.equal(snap.refactorDone, false);
   assert.equal(snap.refactor, null);
   assert.ok(!snap.events.some((e) => e.type === 'refactor'));
+  assert.ok(!snap.events.some((e) => e.type === 'result' && e.label === 'RED re-verify'));
   const summaryEv = snap.events.find((e) => e.type === 'summary');
   assert.ok(summaryEv && summaryEv.type === 'summary' && summaryEv.message.includes('refactor -'));
+});
+
+test('auto-applies a refactor, holds it until accepted, then records it', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green']),
+    headless: false,
+    greenTimeoutMs: 500,
+    cwd,
+  });
+
+  const timer = refactorWatchDriver(session);
+  const startP = session.start();
+  try {
+    await waitFor(() => session.snapshot().refactor !== null);
+    await session.applyRefactor();
+
+    let snap: SessionSnapshot = session.snapshot();
+    assert.equal(snap.refactorPending, true);
+    assert.equal(snap.refactorAccepted, 0);
+    const implPath = path.join(cwd, 'src', 'rateLimiter.ts');
+    assert.ok(fs.readFileSync(implPath, 'utf8').includes('const prune'));
+
+    assert.equal(session.acceptRefactorProposal(), true);
+    snap = session.snapshot();
+    assert.equal(snap.refactorPending, false);
+    assert.equal(snap.refactorAccepted, 1);
+    assert.ok(fs.readFileSync(implPath, 'utf8').includes('const prune'));
+    assert.ok(snap.logs.join('\n').includes('Refactor accepted'));
+
+    session.approve();
+    await startP;
+  } finally {
+    clearInterval(timer);
+    session.dispose();
+  }
+
+  const snap: SessionSnapshot = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.finalGreen, true);
+  assert.equal(snap.refactorDone, true);
+  const summaryEv = snap.events.find((e) => e.type === 'summary');
+  assert.ok(summaryEv && summaryEv.type === 'summary');
+  assert.ok(summaryEv.message.includes('refactor done, 1 applied'));
+});
+
+test('auto-rejects a refactor when the suite breaks and restores the file', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green', 'red', 'green']),
+    headless: false,
+    greenTimeoutMs: 500,
+    cwd,
+  });
+
+  const timer = refactorWatchDriver(session);
+  const startP = session.start();
+  try {
+    await waitFor(() => session.snapshot().refactor !== null);
+    await session.applyRefactor();
+
+    const snap: SessionSnapshot = session.snapshot();
+    assert.equal(snap.refactorPending, false);
+    assert.equal(snap.refactorAccepted, 0);
+    const implPath = path.join(cwd, 'src', 'rateLimiter.ts');
+    const impl = fs.readFileSync(implPath, 'utf8');
+    assert.ok(impl.includes("throw new Error('Not implemented')"));
+    assert.ok(!impl.includes('const prune'));
+    assert.ok(snap.logs.join('\n').includes('Refactor rejected'));
+    assert.ok(snap.logs.join('\n').includes('Restored implementation confirmed GREEN'));
+
+    session.approve();
+    await startP;
+  } finally {
+    clearInterval(timer);
+    session.dispose();
+  }
+
+  const done: SessionSnapshot = session.snapshot();
+  assert.equal(done.finished, true);
+  assert.equal(done.finalGreen, true);
+  assert.equal(done.refactorPending, false);
+  assert.equal(done.refactorAccepted, 0);
+});
+
+test('REDGREEN_REFACTOR runs the refactor phase and auto-applies headlessly', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green', 'green']),
+    headless: true,
+    greenTimeoutMs: 500,
+    refactorEnabled: true,
+    cwd,
+  });
+
+  await session.start();
+  session.dispose();
+
+  const snap: SessionSnapshot = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.finalGreen, true);
+  assert.equal(snap.refactorDone, true);
+  assert.ok(snap.refactor);
+  assert.equal(snap.refactor.suggestions.length, 2);
+  // Both suggestions were suite-verified and auto-accepted with no approval.
+  assert.equal(snap.refactorAccepted, 2);
+  assert.ok(snap.logs.join('\n').includes('Refactor complete - tests still green (2 applied)'));
+  const summaryEv = snap.events.find((e) => e.type === 'summary');
+  assert.ok(summaryEv && summaryEv.type === 'summary');
+  assert.ok(summaryEv.message.includes('refactor done, 2 applied'));
 });

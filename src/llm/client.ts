@@ -57,6 +57,19 @@ const STUB = {
         "    arr.push(now); store.set(key, arr); return false",
     },
   }),
+  nudge: JSON.stringify({
+    small:
+      "The 'flags requests over the limit' test calls check twice for the same key inside the window - look at what state must persist between those two calls.",
+    medium:
+      'Your current failure is about a second call to check for a key you have already seen in this window. Track recent timestamps per key and count only the hits inside windowMs before answering.',
+    big:
+      'check(key):\n' +
+      '  now = Date.now()\n' +
+      '  arr = hits.get(key) ?? []\n' +
+      '  arr = arr.filter(t -> now - t < windowMs)\n' +
+      '  if arr.length >= max: hits.set(key, arr); return true\n' +
+      '  arr.push(now); hits.set(key, arr); return false',
+  }),
   solution: JSON.stringify({
     solutionFile:
       "import type { RateLimiter } from './rateLimiter.types';\n" +
@@ -106,6 +119,33 @@ const STUB = {
       },
     ],
   }),
+  refactorApply: JSON.stringify({
+    filePath: 'src/rateLimiter.ts',
+    code:
+      "import type { RateLimiter } from './rateLimiter.types';\n" +
+      "export function createRateLimiter(opts: { max: number; windowMs: number }): RateLimiter {\n" +
+      "  const hits = new Map<string, number[]>();\n" +
+      "  const prune = (key: string, now: number): number[] => {\n" +
+      "    const arr = hits.get(key) ?? [];\n" +
+      "    let w = 0;\n" +
+      "    for (let i = 0; i < arr.length; i++) {\n" +
+      "      if (now - arr[i] < opts.windowMs) arr[w++] = arr[i];\n" +
+      "    }\n" +
+      "    arr.length = w;\n" +
+      "    return arr;\n" +
+      "  };\n" +
+      "  return {\n" +
+      "    check(key: string): boolean {\n" +
+      "      const now = Date.now();\n" +
+      "      const recent = prune(key, now);\n" +
+      "      if (recent.length >= opts.max) { hits.set(key, recent); return true; }\n" +
+      "      recent.push(now);\n" +
+      "      hits.set(key, recent);\n" +
+      "      return false;\n" +
+      "    },\n" +
+      "  };\n" +
+      "}",
+  }),
 };
 
 async function stubChat(turn: ChatTurn): Promise<string> {
@@ -113,6 +153,8 @@ async function stubChat(turn: ChatTurn): Promise<string> {
   if (user.includes('REDGREEN:TASK=scaffold')) return STUB.scaffold;
   if (user.includes('REDGREEN:TASK=solution')) return STUB.solution;
   if (user.includes('REDGREEN:TASK=attack')) return STUB.attack;
+  if (user.includes('REDGREEN:TASK=nudge')) return STUB.nudge;
+  if (user.includes('REDGREEN:TASK=refactor-apply')) return STUB.refactorApply;
   if (user.includes('REDGREEN:TASK=refactor')) return STUB.refactor;
   return STUB.red;
 }

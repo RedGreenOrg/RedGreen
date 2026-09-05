@@ -186,6 +186,58 @@ ${opts.implContent}`;
   return { system, user };
 }
 
+export const NUDGE_SCHEMA = HINTS_SCHEMA;
+
+export interface NudgePromptOpts {
+  feature: string;
+  runner: TestRunner;
+  moduleName: string;
+  typesPath: string;
+  implPath: string;
+  typesContent: string;
+  implContent: string;
+  /** Human-readable summary of the currently failing assertion(s). */
+  failingAssertions: string;
+  customRules?: string[];
+}
+
+export function buildNudgePrompt(opts: NudgePromptOpts): { system: string; user: string } {
+  const system = `You are the Nudge Engine of RedGreen.
+The human developer is stuck on a failing test. You do NOT write the solution.
+Analyze THE CURRENT failing assertion(s) below and produce three tiers of HINTS targeted at exactly that
+failure. Earlier failures have already been fixed - ignore the contract and focus only on what fails today:
+- small: ONE plain-English sentence pointing at WHERE to look (a specific test, assertion, or contract
+  detail). Point at the direction, never state the answer or an algorithm.
+- medium: a plain-language explanation of the approach/algorithm the developer should reach for,
+  in 2-4 sentences. Still no code.
+- big: pseudocode for the implementation (short function sketches, not real TypeScript). This tier
+  is meant as a last resort, so it may sketch the full logic.
+
+Respond ONLY with a single fenced JSON block:
+{
+  "small": "one line",
+  "medium": "plain explanation",
+  "big": "pseudocode"
+}`;
+
+  const user = `[REDGREEN:TASK=nudge]
+Feature: ${opts.feature}
+Test runner: ${opts.runner}
+Module: ${opts.moduleName}
+
+Currently failing assertion(s):
+${opts.failingAssertions}
+
+Contract file (${opts.typesPath}):
+${opts.typesContent}
+
+Current implementation (${opts.implPath}):
+${opts.implContent}${rulesBlock(opts.customRules)}
+Mint hints for the current failure now.`;
+
+  return { system, user };
+}
+
 export const ATTACK_SCHEMA = z.object({
   testFile: z.string().min(1),
 });
@@ -328,6 +380,68 @@ Passing test suite:
 ${opts.testsContent.slice(0, 8_000)}
 ${rulesBlock(opts.customRules)}
 Propose behavior-preserving refactors now.`;
+  return { system, user };
+}
+
+export const REFACTOR_APPLY_SCHEMA = z.object({
+  filePath: z.string().min(1),
+  code: z.string().min(1),
+});
+
+export interface RefactorApplyPromptOpts {
+  feature: string;
+  runner: TestRunner;
+  moduleName: string;
+  typesPath: string;
+  implPath: string;
+  typesContent: string;
+  implContent: string;
+  testsContent: string;
+  customRules?: string[];
+  suggestion: RefactorSuggestion;
+}
+
+export function buildRefactorApplyPrompt(opts: RefactorApplyPromptOpts): { system: string; user: string } {
+  const s = opts.suggestion;
+  const system = `You are the Verified Refactorer of RedGreen.
+Apply ONE human-approved refactoring to the implementation. Your change will be run against the
+passing test suite before it is accepted - if you break a single test, the change is rejected and
+the developer keeps their original code.
+
+Rules:
+- Output the COMPLETE modified implementation file (not a diff, not a snippet).
+- Keep the public API surface IDENTICAL to the contract: same exports, same function signatures.
+- Never modify the contract (types file) or any test file.
+- Preserve behavior exactly: every currently passing test must still pass after your edits.
+- Apply ONLY the requested refactoring below. No unrelated tidy-ups, no rewrites.
+
+Respond ONLY with a single fenced JSON block:
+{
+  "filePath": "path to the implementation file",
+  "code": "complete modified implementation file content"
+}`;
+
+  const user = `[REDGREEN:TASK=refactor-apply]
+Feature: ${opts.feature}
+Test runner: ${opts.runner}
+Module: ${opts.moduleName}
+
+Suggestion to apply:
+- title: ${s.title}
+- category: ${s.category}
+- what: ${s.what}
+- why: ${s.why}
+
+Current implementation (${opts.implPath}):
+${opts.implContent.slice(0, 12_000)}
+
+Contract (${opts.typesPath}):
+${opts.typesContent.slice(0, 8_000)}
+
+Passing test suite (your safety net):
+${opts.testsContent.slice(0, 8_000)}
+${rulesBlock(opts.customRules)}
+Apply the refactoring now.`;
   return { system, user };
 }
 

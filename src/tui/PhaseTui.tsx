@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import fs from 'node:fs';
 import { Box, Text, useApp, useInput, useStdout } from 'ink';
 import { render } from 'ink';
 import { DevSession, type SessionEvent } from '../core/session.js';
@@ -232,7 +233,8 @@ const HELP_LINES: Array<[string, string]> = [
   ['n', 'new feature (when finished)'],
   ['h', 'hints (small / medium / big)'],
   ['S', 'reference solution (after green)'],
-  ['v', 'view refactor suggestions'],
+  ['v', 'view tests (RED review) / refactor suggestions'],
+  ['a', 'auto-apply refactor (test-verified)'],
   ['x', 'expand / collapse latest test run'],
   ['t', 'switch theme'],
   ['j / k', 'scroll timeline'],
@@ -243,7 +245,7 @@ const HELP_LINES: Array<[string, string]> = [
   ['?', 'close this help'],
 ];
 
-const COMMANDS = ['/help', '/quit', '/skip', '/approve', '/retry', '/expand', '/themes', '/hints', '/solution', '/refactor', '/new'];
+const COMMANDS = ['/help', '/quit', '/skip', '/approve', '/retry', '/expand', '/themes', '/hints', '/solution', '/refactor', '/apply', '/new'];
 
 // Layout cells are marked with a private-use sentinel (SENT) instead of
 // spaces: the clean stdout writer (screen.ts) recognizes sentinel runs as
@@ -626,6 +628,90 @@ export function SolutionOverlay({
   );
 }
 
+export function TestReviewOverlay({
+  testsPath,
+  onClose,
+  theme,
+  maxCols,
+  maxRows,
+}: {
+  testsPath: string | null;
+  onClose: () => void;
+  theme: Theme;
+  maxCols: number;
+  maxRows: number;
+}): React.ReactElement {
+  const [scroll, setScroll] = useState(0);
+  useInput((input, key) => {
+    if (key.escape || input === 'q' || input === 'v') return onClose();
+    if (input === 'j' || key.downArrow) setScroll((v) => v + 1);
+    if (input === 'k' || key.upArrow) setScroll((v) => Math.max(0, v - 1));
+    if (input === 'G') setScroll((v) => v + 8);
+    if (input === 'g') setScroll(0);
+  });
+
+  const content = useMemo(() => {
+    if (!testsPath) return 'No test file yet.';
+    try {
+      return fs.readFileSync(testsPath, 'utf8');
+    } catch {
+      return `Could not read ${testsPath}`;
+    }
+  }, [testsPath]);
+
+  const fill = theme.backgroundElement;
+  const cw = overlayWidth(maxCols, 0.9, 56);
+  const bodyW = cw - 3;
+  const lines = wrapHint(content, bodyW);
+
+  const bodyViewport = Math.max(2, maxRows - 6);
+  const maxScroll = Math.max(0, lines.length - bodyViewport);
+  const scrolled = Math.min(scroll, maxScroll);
+  const shown = lines.slice(scrolled, scrolled + bodyViewport);
+  const name = testsPath ? testsPath.split(/[\\/]/).pop() ?? testsPath : '';
+  const footer = `${name} · j/k scroll${maxScroll > 0 ? ` · ${scrolled + 1}/${lines.length}` : ''} · esc close`;
+
+  const tail = (contentLen: number): React.ReactElement => (
+    <>
+      {pad(cw - contentLen - 1)}
+      <Block color={fill} />
+    </>
+  );
+
+  return (
+    <Text backgroundColor={fill}>
+      {tail(0)}
+      {'\n'}
+      <Text bold color={theme.primary}>
+        {pad(2)}
+        RED tests - your intent
+      </Text>
+      {tail(2 + 21)}
+      {'\n'}
+      <Text color={theme.textMuted}>
+        {pad(2)}
+        {'─'.repeat(Math.max(0, cw - 2))}
+      </Text>
+      {'\n'}
+      {shown.map((line, i) => (
+        <Text key={i}>
+          {pad(2)}
+          <Text color={theme.text}>{line}</Text>
+          {tail(2 + line.length)}
+          {'\n'}
+        </Text>
+      ))}
+      <Text color={theme.textMuted}>
+        {pad(2)}
+        {footer}
+      </Text>
+      {tail(2 + footer.length)}
+      {'\n'}
+      {tail(0)}
+    </Text>
+  );
+}
+
 export function RefactorOverlay({
   data,
   onClose,
@@ -667,6 +753,7 @@ export function RefactorOverlay({
     }
     lines.push({ text: '', color: theme.text });
   }
+  lines.push({ text: 'press a to auto-apply the next suggestion (suite-verified first) · esc close', color: theme.warning });
 
   const bodyViewport = Math.max(2, maxRows - 6);
   const maxScroll = Math.max(0, lines.length - bodyViewport);
@@ -739,6 +826,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   const [hintSel, setHintSel] = useState<number>(0);
   const [showSolution, setShowSolution] = useState(false);
   const [showRefactor, setShowRefactor] = useState(false);
+  const [showTestReview, setShowTestReview] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [clock, setClock] = useState(() => new Date().toTimeString().slice(0, 8));
@@ -750,7 +838,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   // tick, session updates): each setState there repaints the whole frame,
   // which is what flickers/lags when browsing a large list.
   const overlayRef = useRef(false);
-  overlayRef.current = showHelp || showThemes || showHints || showSolution || showRefactor;
+  overlayRef.current = showHelp || showThemes || showHints || showSolution || showRefactor || showTestReview;
 
   useEffect(() => {
     if (!sessionRef.current) return;
@@ -783,6 +871,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     setShowHelp(false);
     setShowThemes(false);
     setShowRefactor(false);
+    setShowTestReview(false);
     setExpanded(true);
     setScroll(0);
     setStatusMsg(null);
@@ -849,6 +938,18 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
             }
             return;
           }
+          if (cmd === '/apply') {
+            if (snap.refactorPending) {
+              s.acceptRefactorProposal();
+            } else if (snap.refactor && snap.refactor.suggestions.length > 0) {
+              void s.applyRefactor();
+            } else {
+              setStatusMsg('no refactor suggestions yet');
+              if (statusTimer.current) clearTimeout(statusTimer.current);
+              statusTimer.current = setTimeout(() => setStatusMsg(null), 2500);
+            }
+            return;
+          }
           if (cmd === '/new' || cmd.startsWith('/new ')) {
             const feat = typed.trim().slice(4).trim();
             if (!feat) {
@@ -877,11 +978,26 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
       if (input === '\r' || input === ' ') return s.approve();
       if (input === 's') return s.skip();
       if (input === 'r') {
-        if (snap.recoverableError && !snap.finished) void s.retryFailedStep();
-        else {
+        if (snap.refactorPending) {
+          void s.rejectRefactorProposal();
+        } else if (snap.recoverableError && !snap.finished) {
+          void s.retryFailedStep();
+        } else {
           setStatusMsg('nothing to retry');
           if (statusTimer.current) clearTimeout(statusTimer.current);
           statusTimer.current = setTimeout(() => setStatusMsg(null), 2000);
+        }
+        return;
+      }
+      if (input === 'a') {
+        if (snap.refactorPending) {
+          s.acceptRefactorProposal();
+        } else if (snap.refactor && snap.refactor.suggestions.length > 0) {
+          void s.applyRefactor();
+        } else {
+          setStatusMsg('no refactor suggestions yet');
+          if (statusTimer.current) clearTimeout(statusTimer.current);
+          statusTimer.current = setTimeout(() => setStatusMsg(null), 2500);
         }
         return;
       }
@@ -902,6 +1018,8 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
       }
       if (input === 'h') {
         if (snap.hints) {
+          // Nudges re-aim at the current failing assertion when it has changed.
+          void s.refreshNudges();
           setHintSel(0);
           setShowHints(true);
         }
@@ -919,7 +1037,9 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
         return;
       }
       if (input === 'v') {
-        if (snap.refactor && snap.refactor.suggestions.length > 0) {
+        if ((snap.prompt ?? '').includes('Tests are RED')) {
+          setShowTestReview(true);
+        } else if (snap.refactor && snap.refactor.suggestions.length > 0) {
           setShowRefactor(true);
         } else {
           setStatusMsg('no refactor suggestions yet');
@@ -1269,6 +1389,17 @@ const mainScreen = (
             maxRows={rows}
             maxCols={w}
             onClose={() => setShowRefactor(false)}
+          />
+        </Box>
+      )}
+      {showTestReview && (
+        <Box position="absolute" alignSelf="center" marginTop={3}>
+          <TestReviewOverlay
+            testsPath={snap.files.tests}
+            theme={theme}
+            maxRows={rows}
+            maxCols={w}
+            onClose={() => setShowTestReview(false)}
           />
         </Box>
       )}
