@@ -9,7 +9,7 @@ import type { TestRunner } from '../runners/types.js';
 import { THEME_NAMES, updateTheme, type ThemeName } from '../config/config.js';
 import { THEMES, installSystemTheme, resolveThemeName, type Theme } from './theme.js';
 import { SENT, createCleanStdout } from './screen.js';
-import type { HintTier, Hints } from '../prompts/prompts.js';
+import type { HintTier, Hints, RefactorSuggestions } from '../prompts/prompts.js';
 
 export interface PhaseTuiProps {
   feature: string;
@@ -169,6 +169,18 @@ function EventLine({
         </Text>
       );
     }
+    case 'refactor': {
+      return (
+        <Text backgroundColor={base}>
+          {base ? pad(5) : null}
+          <Text bold color={theme.info}>
+            [R]
+          </Text>
+          <Text color={theme.info}> {ev.message}</Text>
+          {tail(5, 3 + 1 + ev.message.length, true)}
+        </Text>
+      );
+    }
     case 'result': {
       const { verdict, label, detail } = formatResult(ev);
       const color = verdict === 'green' ? theme.success : verdict === 'red' ? theme.error : theme.textMuted;
@@ -220,6 +232,7 @@ const HELP_LINES: Array<[string, string]> = [
   ['n', 'new feature (when finished)'],
   ['h', 'hints (small / medium / big)'],
   ['S', 'reference solution (after green)'],
+  ['v', 'view refactor suggestions'],
   ['x', 'expand / collapse latest test run'],
   ['t', 'switch theme'],
   ['j / k', 'scroll timeline'],
@@ -230,7 +243,7 @@ const HELP_LINES: Array<[string, string]> = [
   ['?', 'close this help'],
 ];
 
-const COMMANDS = ['/help', '/quit', '/skip', '/approve', '/retry', '/expand', '/themes', '/hints', '/solution', '/new'];
+const COMMANDS = ['/help', '/quit', '/skip', '/approve', '/retry', '/expand', '/themes', '/hints', '/solution', '/refactor', '/new'];
 
 // Layout cells are marked with a private-use sentinel (SENT) instead of
 // spaces: the clean stdout writer (screen.ts) recognizes sentinel runs as
@@ -613,6 +626,95 @@ export function SolutionOverlay({
   );
 }
 
+export function RefactorOverlay({
+  data,
+  onClose,
+  theme,
+  maxCols,
+  maxRows,
+}: {
+  data: RefactorSuggestions;
+  onClose: () => void;
+  theme: Theme;
+  maxCols: number;
+  maxRows: number;
+}): React.ReactElement {
+  const [scroll, setScroll] = useState(0);
+  useInput((input, key) => {
+    if (key.escape || input === 'q' || input === 'v') return onClose();
+    if (input === 'j' || key.downArrow) setScroll((v) => v + 1);
+    if (input === 'k' || key.upArrow) setScroll((v) => Math.max(0, v - 1));
+    if (input === 'G') setScroll((v) => v + 8);
+    if (input === 'g') setScroll(0);
+  });
+
+  const fill = theme.backgroundElement;
+  const cw = overlayWidth(maxCols, 0.9, 56);
+  const bodyW = cw - 3;
+  const lines: Array<{ text: string; color: string | undefined }> = [];
+  for (const raw of wrapHint(data.note, bodyW)) {
+    lines.push({ text: raw, color: theme.warning });
+  }
+  lines.push({ text: '', color: theme.text });
+  for (const s of data.suggestions) {
+    lines.push({ text: `▸ ${s.title}`, color: theme.primary });
+    lines.push({
+      text: `  [${s.category}] ${s.what}`,
+      color: theme.text,
+    });
+    for (const raw of wrapHint(`  why: ${s.why}`, bodyW)) {
+      lines.push({ text: raw, color: theme.textMuted });
+    }
+    lines.push({ text: '', color: theme.text });
+  }
+
+  const bodyViewport = Math.max(2, maxRows - 6);
+  const maxScroll = Math.max(0, lines.length - bodyViewport);
+  const scrolled = Math.min(scroll, maxScroll);
+  const shown = lines.slice(scrolled, scrolled + bodyViewport);
+  const footer = `j/k scroll${maxScroll > 0 ? ` · ${scrolled + 1}/${lines.length}` : ''} · esc close`;
+
+  const tail = (contentLen: number): React.ReactElement => (
+    <>
+      {pad(cw - contentLen - 1)}
+      <Block color={fill} />
+    </>
+  );
+
+  return (
+    <Text backgroundColor={fill}>
+      {tail(0)}
+      {'\n'}
+      <Text bold color={theme.primary}>
+        {pad(2)}
+        refactor suggestions
+      </Text>
+      {tail(2 + 19)}
+      {'\n'}
+      <Text color={theme.textMuted}>
+        {pad(2)}
+        {'─'.repeat(Math.max(0, cw - 2))}
+      </Text>
+      {'\n'}
+      {shown.map((line, i) => (
+        <Text key={i}>
+          {pad(2)}
+          <Text color={line.color}>{line.text}</Text>
+          {tail(2 + line.text.length)}
+          {'\n'}
+        </Text>
+      ))}
+      <Text color={theme.textMuted}>
+        {pad(2)}
+        {footer}
+      </Text>
+      {tail(2 + footer.length)}
+      {'\n'}
+      {tail(0)}
+    </Text>
+  );
+}
+
 export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }: PhaseTuiProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -636,6 +738,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   const [showHints, setShowHints] = useState(false);
   const [hintSel, setHintSel] = useState<number>(0);
   const [showSolution, setShowSolution] = useState(false);
+  const [showRefactor, setShowRefactor] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [clock, setClock] = useState(() => new Date().toTimeString().slice(0, 8));
@@ -647,7 +750,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   // tick, session updates): each setState there repaints the whole frame,
   // which is what flickers/lags when browsing a large list.
   const overlayRef = useRef(false);
-  overlayRef.current = showHelp || showThemes || showHints || showSolution;
+  overlayRef.current = showHelp || showThemes || showHints || showSolution || showRefactor;
 
   useEffect(() => {
     if (!sessionRef.current) return;
@@ -679,6 +782,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     setShowHints(false);
     setShowHelp(false);
     setShowThemes(false);
+    setShowRefactor(false);
     setExpanded(true);
     setScroll(0);
     setStatusMsg(null);
@@ -690,7 +794,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     (input, key) => {
       const s = sessionRef.current;
       if (!s) return;
-      if (showHelp || showThemes || showHints || showSolution) return;
+      if (showHelp || showThemes || showHints || showSolution || showRefactor) return;
       if (inputMode) {
         if (key.escape) {
           setInputMode(false);
@@ -730,6 +834,16 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
               void s.requestSolution();
             } else {
               setStatusMsg('solution locked - reach GREEN first');
+              if (statusTimer.current) clearTimeout(statusTimer.current);
+              statusTimer.current = setTimeout(() => setStatusMsg(null), 2500);
+            }
+            return;
+          }
+          if (cmd === '/refactor') {
+            if (snap.refactor && snap.refactor.suggestions.length > 0) {
+              setShowRefactor(true);
+            } else {
+              setStatusMsg('no refactor suggestions yet');
               if (statusTimer.current) clearTimeout(statusTimer.current);
               statusTimer.current = setTimeout(() => setStatusMsg(null), 2500);
             }
@@ -801,6 +915,16 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
           setStatusMsg('solution locked - reach GREEN first');
           if (statusTimer.current) clearTimeout(statusTimer.current);
           statusTimer.current = setTimeout(() => setStatusMsg(null), 2500);
+        }
+        return;
+      }
+      if (input === 'v') {
+        if (snap.refactor && snap.refactor.suggestions.length > 0) {
+          setShowRefactor(true);
+        } else {
+          setStatusMsg('no refactor suggestions yet');
+          if (statusTimer.current) clearTimeout(statusTimer.current);
+          statusTimer.current = setTimeout(() => setStatusMsg(null), 2000);
         }
         return;
       }
@@ -1134,6 +1258,17 @@ const mainScreen = (
             maxRows={rows}
             maxCols={w}
             onClose={() => setShowSolution(false)}
+          />
+        </Box>
+      )}
+      {showRefactor && snap.refactor && (
+        <Box position="absolute" alignSelf="center" marginTop={3}>
+          <RefactorOverlay
+            data={snap.refactor}
+            theme={theme}
+            maxRows={rows}
+            maxCols={w}
+            onClose={() => setShowRefactor(false)}
           />
         </Box>
       )}

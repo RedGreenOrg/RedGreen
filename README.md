@@ -2,12 +2,13 @@
 
 Reclaim your coding flow state with **Type-First Ping-Pong TDD**.
 
-RedGreen is an interactive terminal coach that pairs with your editor and test runner to run a red-green-attack TDD loop with an AI partner:
+RedGreen is an interactive terminal coach that pairs with your editor and test runner to run a red-green-attack-refactor TDD loop with an AI partner:
 
 1. **Type-first scaffold** — you describe a feature; RedGreen generates module + test types via AI.
 2. **RED** — it writes failing tests for the types and verifies they fail on your runner.
 3. **GREEN** — the watcher detects your implementation; the loop passes when tests go green.
 4. **Attack rounds** — the AI attacks your implementation with edge cases; survive three rounds for a verified module.
+5. **Refactor** — the AI proposes behavior-preserving cleanups while you keep the suite green.
 
 ```bash
 $ npx redgreen init
@@ -57,6 +58,10 @@ Scaffolded stubs get contract-explaining JSDoc by default (describing *what* eac
 - Module names are inferred from the feature description (e.g. `"Create a sliding window rate limiter"` → `src/rateLimiter.ts`).
 - `REDGREEN_GREEN_TIMEOUT` (default `30`s) controls how long the watcher waits for your implementation.
 - Non-TTY terminals get a headless mode with the same state machine — CI-friendly.
+
+### Refactor phase
+
+After the attack rounds, RedGreen closes the loop with a **Refactor phase**: the AI reviews your green implementation and proposes targeted, behavior-preserving upstream refactors (structure, performance, clarity). It never writes the code — you do. While you work, RedGreen re-runs the full suite on every save and warns if a change turns the tests red. Press `v` or `/refactor` to view the suggestions. The phase is interactive-only; headless runs skip it.
 
 ### Project rules
 

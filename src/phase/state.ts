@@ -3,6 +3,7 @@ export const PHASES = [
   { id: 'red', label: '2. Red Phase', blurb: 'AI generates failing tests - watch them fail' },
   { id: 'green', label: '3. Green Phase', blurb: 'You write the implementation until tests pass' },
   { id: 'attack', label: '4. Attack Phase', blurb: 'AI attacks your code with devious edge cases' },
+  { id: 'refactor', label: '5. Refactor Phase', blurb: 'AI proposes cleanups - keep the suite green' },
 ] as const;
 
 export type PhaseId = (typeof PHASES)[number]['id'];
@@ -15,6 +16,7 @@ export function initialStatuses(startAt: PhaseId): Record<PhaseId, PhaseStatus> 
     red: 'pending',
     green: 'pending',
     attack: 'pending',
+    refactor: 'pending',
   };
   let began = false;
   for (const phase of PHASES) {

@@ -89,6 +89,23 @@ const STUB = {
       "  });\n" +
       "});",
   }),
+  refactor: JSON.stringify({
+    note: "The core check() loop prunes expired timestamps inline - extract that and avoid rebuilding the array on every call.",
+    suggestions: [
+      {
+        title: 'extract a prune helper',
+        category: 'structure',
+        what: "move the 'arr.filter(t -> now - t < windowMs)' logic out of check() into a private helper",
+        why: 'the pruning intent is buried inside the hot path and hard to test in isolation',
+      },
+      {
+        title: 'avoid reallocating the timestamp array every check',
+        category: 'performance',
+        what: 'prune the array in place (or reuse a writable slot) instead of allocating a fresh array each call',
+        why: 'check() runs on every request; needless garbage is on the hot path',
+      },
+    ],
+  }),
 };
 
 async function stubChat(turn: ChatTurn): Promise<string> {
@@ -96,6 +113,7 @@ async function stubChat(turn: ChatTurn): Promise<string> {
   if (user.includes('REDGREEN:TASK=scaffold')) return STUB.scaffold;
   if (user.includes('REDGREEN:TASK=solution')) return STUB.solution;
   if (user.includes('REDGREEN:TASK=attack')) return STUB.attack;
+  if (user.includes('REDGREEN:TASK=refactor')) return STUB.refactor;
   return STUB.red;
 }
 

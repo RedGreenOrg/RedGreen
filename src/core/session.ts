@@ -7,14 +7,17 @@ import { completeStructured } from '../llm/structured.js';
 import {
   ATTACK_SCHEMA,
   RED_SCHEMA,
+  REFACTOR_SCHEMA,
   SCAFFOLD_SCHEMA,
   SOLUTION_SCHEMA,
   buildAttackPrompt,
   buildRedPrompt,
+  buildRefactorPrompt,
   buildScaffoldPrompt,
   buildSolutionPrompt,
   type Hints,
   type HintTier,
+  type RefactorSuggestions,
 } from '../prompts/prompts.js';
 import { runTests } from '../runners/execute.js';
 import { isGreen } from '../runners/types.js';
@@ -55,6 +58,10 @@ export interface SessionSnapshot {
   greenReached: boolean;
   solution: string | null;
   solutionExplanation: string | null;
+  /** Refactor suggestions proposed by the AI during the refactor phase. */
+  refactor: RefactorSuggestions | null;
+  /** Whether the refactor phase ran to completion. */
+  refactorDone: boolean;
   /** Non-null while an AI step failed and the session is paused awaiting retry. */
   recoverableError: string | null;
   /** Last failure of reference-solution generation (independent of the pipeline). */
@@ -67,6 +74,7 @@ export type SessionEvent =
   | { type: 'error'; message: string }
   | { type: 'result'; label: string; result: TestRunResult }
   | { type: 'attack'; round: number; total: number; survived: boolean }
+  | { type: 'refactor'; message: string }
   | { type: 'summary'; green: boolean; message: string };
 
 export interface DevSessionOptions {
@@ -86,8 +94,11 @@ export interface DevSessionOptions {
 }
 
 const MAX_ATTACK_ROUNDS = 3;
-// 0 scaffold · 1 review gate · 2 red · 3 green watch · 4..6 attack rounds
-const PIPELINE_STEPS = 3 + MAX_ATTACK_ROUNDS;
+const MAX_REFACTOR_ROUNDS = 1;
+// 0 scaffold · 1 review gate · 2 red · 3 green watch · 4..6 attack rounds ·
+// 7..8 refactor rounds
+const PIPELINE_STEPS = 3 + MAX_ATTACK_ROUNDS + MAX_REFACTOR_ROUNDS;
+const REFACTOR_STEP = 3 + MAX_ATTACK_ROUNDS;
 
 type StepOutcome =
   | 'continue' // move on to the next pipeline step
@@ -121,6 +132,7 @@ export class DevSession extends EventEmitter {
     red: 'pending',
     green: 'pending',
     attack: 'pending',
+    refactor: 'pending',
   };
   private result: TestRunResult | null = null;
   private logs: string[] = [];
@@ -140,6 +152,8 @@ export class DevSession extends EventEmitter {
   private greenFailures = 0;
   private forceFreshScaffold = false;
   private generation = 0;
+  private refactor: RefactorSuggestions | null = null;
+  private refactorDone = false;
 
   private readonly retryAttempts: number;
   private readonly retryBaseDelayMs: number;
@@ -231,6 +245,8 @@ export class DevSession extends EventEmitter {
       greenReached: this.greenReachedAt !== null,
       solution: this.solution,
       solutionExplanation: this.solutionExplanation,
+      refactor: this.refactor,
+      refactorDone: this.refactorDone,
       recoverableError: this.recoverableError,
       solutionError: this.solutionError,
     };
@@ -359,7 +375,7 @@ export class DevSession extends EventEmitter {
   }
 
   private resetState(): void {
-    this.statuses = { scaffold: 'active', red: 'pending', green: 'pending', attack: 'pending' };
+    this.statuses = { scaffold: 'active', red: 'pending', green: 'pending', attack: 'pending', refactor: 'pending' };
     this.result = null;
     this.logs = [];
     this.events = [];
@@ -376,6 +392,8 @@ export class DevSession extends EventEmitter {
     this.solution = null;
     this.solutionExplanation = null;
     this.greenFailures = 0;
+    this.refactor = null;
+    this.refactorDone = false;
     // NOTE: forceFreshScaffold is intentionally NOT reset here - restart()
     // sets it before calling resetState so the next scaffold skips reuse.
     this.recoverableError = null;
@@ -477,7 +495,9 @@ export class DevSession extends EventEmitter {
       case 1: return 'review';
       case 2: return 'red phase';
       case 3: return 'green phase';
-      default: return `attack round ${this.pipelineStep - 3}`;
+      default:
+        if (this.pipelineStep < REFACTOR_STEP) return `attack round ${this.pipelineStep - 3}`;
+        return `refactor round ${this.pipelineStep - REFACTOR_STEP + 1}`;
     }
   }
 
@@ -507,6 +527,7 @@ export class DevSession extends EventEmitter {
       case 1: return this.stepReviewGate();
       case 2: return this.stepRed();
       case 3: return this.stepGreenWatch();
+      case REFACTOR_STEP: return this.stepRefactor();
       default: return this.stepAttack(step - 3);
     }
   }
@@ -644,6 +665,110 @@ export class DevSession extends EventEmitter {
     return Boolean(this.result && isGreen(this.result));
   }
 
+  private async stepRefactor(): Promise<StepOutcome> {
+    // Interactive edit phase - pointless headlessly and meaningless without GREEN.
+    if (this.headless) return 'continue';
+    if (!this.finalStatusWasGreen()) {
+      this.log('Refactor phase skipped - suite is not green');
+      this.pushEvent({ type: 'info', message: 'Refactor phase skipped (suite not green)' });
+      return 'continue';
+    }
+    try {
+      await this.runRefactorRound();
+    } catch (err) {
+      this.pauseWithError('Refactor phase', err);
+      return 'paused';
+    }
+    if (this.quitting) return 'finish-current';
+
+    const outcome = await this.watchRefactorEdits();
+    if (outcome.choice === 'quit') return 'finish-current';
+
+    this.refactorDone = true;
+    const green = isGreen(outcome.result);
+    this.log(green ? 'Refactor complete - tests still green' : 'Refactor complete (tests not green)');
+    this.setStatuses({ refactor: green ? 'done' : 'error' });
+    return 'continue';
+  }
+
+  private async runRefactorRound(): Promise<void> {
+    this.setStatuses({ refactor: 'active' });
+    this.setPrompt('Analyzing your implementation for refactors...');
+
+    const allTests = [this.files.tests, ...this.files.attacks]
+      .filter((f): f is string => Boolean(f))
+      .map((f) => this.readFileSafe(f))
+      .join('\n\n');
+
+    const { value } = await this.chatWithBackoff('Refactor', () =>
+      completeStructured({
+        chat: this.chat,
+        debugTag: 'refactor',
+        schema: REFACTOR_SCHEMA,
+        ...buildRefactorPrompt({
+          feature: this.feature,
+          runner: this.runner,
+          moduleName: this.moduleName ?? moduleNameFromFeature(this.feature),
+          typesPath: this.relative(this.files.types),
+          implPath: this.relative(this.files.impl),
+          typesContent: this.readFileSafe(this.files.types ?? ''),
+          implContent: this.readFileSafe(this.files.impl ?? ''),
+          testsContent: allTests,
+          customRules: this.customRules,
+        }),
+      }),
+    );
+
+    this.refactor = value;
+    const n = value.suggestions.length;
+    this.log(`Refactor: ${n} suggestion${n === 1 ? '' : 's'} ready - press v to view`);
+    this.pushEvent({ type: 'refactor', message: `${n} refactor suggestion${n === 1 ? '' : 's'} ready - press v to view` });
+    this.emitUpdate();
+  }
+
+  private watchRefactorEdits(): Promise<{ result: TestRunResult; choice: WaitChoice }> {
+    return new Promise((resolve) => {
+      const targets = [this.files.impl!, ...(this.files.types ? [this.files.types!] : [])].filter(
+        Boolean,
+      );
+      const watcher = watch(targets, { ignoreInitial: true });
+      this.activeWatcher = watcher;
+      let debounce: NodeJS.Timeout | null = null;
+      let settled = false;
+      const files = [this.files.tests!, ...this.files.attacks];
+
+      const finish = (choice: WaitChoice): void => {
+        if (settled) return;
+        settled = true;
+        if (debounce) clearTimeout(debounce);
+        this.activeWatcher = null;
+        void watcher.close();
+        resolve({ result: this.result ?? this.emptyResult(), choice });
+      };
+
+      const run = async (): Promise<void> => {
+        try {
+          const r = await this.runTestsOn(files, 'refactor');
+          if (isGreen(r)) {
+            this.log(`GREEN - tests still pass (${r.passed}/${r.total}) after your edits`);
+          } else {
+            this.log(`Tests went red (${r.passed}/${r.total} passing) - keep refactoring or undo`);
+          }
+        } catch (err) {
+          this.log(`Test run failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+
+      watcher.on('change', () => {
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(() => void run(), 300);
+      });
+
+      this.setPrompt('Refactor freely - RedGreen re-runs on each save · enter done · q quit');
+      void this.wait(null).then((choice) => finish(choice));
+    });
+  }
+
   private finish(finalGreen: boolean): void {
     if (this.finished) return;
     this.finished = true;
@@ -654,6 +779,7 @@ export class DevSession extends EventEmitter {
       red: 'done',
       green: finalGreen ? 'done' : 'error',
       attack: this.attackRoundsSurvived > 0 ? 'done' : 'pending',
+      refactor: this.refactorDone ? (finalGreen ? 'done' : 'error') : 'pending',
     });
     this.pushSummaryEvent(finalGreen);
     this.emit('finish', finalGreen);
@@ -678,6 +804,7 @@ export class DevSession extends EventEmitter {
       finalGreen ? 'GREEN' : 'not green',
       r ? `${r.passed}/${r.total} passing` : 'no test run',
       `attacks ${this.attackRoundsSurvived}/${MAX_ATTACK_ROUNDS}`,
+      `refactor ${this.refactorDone ? 'done' : '-'}`,
     ];
     const ttg = this.timeToGreenSeconds();
     if (ttg !== null) bits.push(`green in ${formatDuration(ttg * 1000)}`);

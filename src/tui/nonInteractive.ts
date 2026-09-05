@@ -17,6 +17,7 @@ function printSummary(s: SessionSnapshot, cwd: string): void {
   if (s.moduleName) console.log(`  module: ${rel(path.join(cwd, 'src', s.moduleName))}`);
   console.log(`  result: ${s.finalGreen ? 'GREEN' : 'NOT GREEN'} - ${s.result?.passed ?? 0}/${s.result?.total ?? 0} passing`);
   console.log(`  attack rounds survived: ${s.attackRoundsSurvived}/3`);
+  console.log(`  refactor: ${s.refactorDone ? 'done' : '-'}`);
   if (files.length > 0) console.log(`  files: ${files.map(rel).join(', ')}`);
 }
 

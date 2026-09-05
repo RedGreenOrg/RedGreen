@@ -564,3 +564,97 @@ test('resumes an interrupted session: existing module + tests skip scaffold and 
   assert.ok(snap.logs.join('\n').includes('Resuming'));
   assert.equal(snap.finalGreen, true);
 });
+
+const REFACTOR_RESPONSE = JSON.stringify({
+  note: 'The sliding-window filter is duplicated across check() calls.',
+  suggestions: [
+    {
+      title: 'extract a prune helper',
+      category: 'structure',
+      what: 'pull the timestamp-pruning filter into a private helper',
+      why: 'it appears twice and its intent is not obvious',
+    },
+    {
+      title: 'avoid rebuilding the array every check',
+      category: 'performance',
+      what: 'reuse the in-place-pruned array instead of allocating a new one',
+      why: 'check() is on the hot path',
+    },
+  ],
+});
+
+function refactorChat(): ChatFn {
+  return async (turn) => {
+    const user = turn.user ?? '';
+    if (user.includes('REDGREEN:TASK=scaffold')) return SCAFFOLD;
+    if (user.includes('REDGREEN:TASK=refactor')) return REFACTOR_RESPONSE;
+    if (user.includes('REDGREEN:TASK=attack')) return JSON.stringify({ testFile: ATTACK_TESTS });
+    return JSON.stringify({ testFile: RED_TESTS });
+  };
+}
+
+test('runs the refactor phase interactively: AI suggestions then a green watch', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'green', 'green', 'green', 'green']),
+    headless: false,
+    greenTimeoutMs: 500,
+    cwd,
+  });
+
+  // Non-interactive test driver: approve every interactive gate (review,
+  // next attack round, refactor done) as soon as it appears.
+  const timer = setInterval(() => {
+    const s = session.snapshot();
+    if (s.finished) return;
+    const p = s.prompt ?? '';
+    if (p.includes('approve') || p.includes('Refactor freely') || p.includes('another attack')) {
+      session.approve();
+    }
+  }, 5);
+  try {
+    await session.start();
+  } finally {
+    clearInterval(timer);
+    session.dispose();
+  }
+
+  const snap: SessionSnapshot = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.finalGreen, true);
+  assert.equal(snap.refactorDone, true);
+  assert.ok(snap.refactor);
+  assert.equal(snap.refactor.suggestions.length, 2);
+  assert.ok(snap.events.some((e) => e.type === 'refactor'));
+  assert.ok(snap.logs.join('\n').includes('Refactor complete'));
+  const summaryEv = snap.events.find((e) => e.type === 'summary');
+  assert.ok(summaryEv && summaryEv.type === 'summary');
+  assert.ok(summaryEv.message.includes('refactor done'));
+});
+
+test('refactor phase is skipped in headless mode', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: refactorChat(),
+    execute: queueExecutor(['red', 'green', 'green', 'green']),
+    headless: true,
+    greenTimeoutMs: 50,
+    cwd,
+  });
+
+  await session.start();
+
+  const snap: SessionSnapshot = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.finalGreen, true);
+  assert.equal(snap.refactorDone, false);
+  assert.equal(snap.refactor, null);
+  assert.ok(!snap.events.some((e) => e.type === 'refactor'));
+  const summaryEv = snap.events.find((e) => e.type === 'summary');
+  assert.ok(summaryEv && summaryEv.type === 'summary' && summaryEv.message.includes('refactor -'));
+});

@@ -244,6 +244,93 @@ Attack the implementation now.`;
   return { system, user };
 }
 
+export const REFACTOR_SCHEMA = z.object({
+  note: z.string().min(1),
+  suggestions: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        category: z.enum(['structure', 'performance', 'clarity']),
+        what: z.string().min(1),
+        why: z.string().min(1),
+      }),
+    )
+    .min(1)
+    .max(8),
+});
+
+export type RefactorCategory = 'structure' | 'performance' | 'clarity';
+
+export interface RefactorSuggestion {
+  title: string;
+  category: RefactorCategory;
+  what: string;
+  why: string;
+}
+
+export interface RefactorSuggestions {
+  note: string;
+  suggestions: RefactorSuggestion[];
+}
+
+export interface RefactorPromptOpts {
+  feature: string;
+  runner: TestRunner;
+  moduleName: string;
+  typesPath: string;
+  implPath: string;
+  typesContent: string;
+  implContent: string;
+  testsContent: string;
+  customRules?: string[];
+}
+
+export function buildRefactorPrompt(opts: RefactorPromptOpts): { system: string; user: string } {
+  const system = `You are the Refactor Coach of RedGreen.
+The implementation is GREEN. Your job is to help the human restructure it WITHOUT breaking that.
+You never write code - you propose targeted, behavior-preserving refactors the developer can apply.
+
+Rules:
+- Every suggestion must keep the passing test suite green - it is the safety net.
+- Categories:
+  - structure: extract helpers, remove duplication, reorder, split modules, simplify control flow.
+  - performance: remove needless allocations/scans, avoid O(n^2) paths, hot-path tweaks.
+  - clarity: better names, focused comments, consistent style.
+- NEVER propose changing the public contract (types file) or the tests.
+- Keep the public API surface identical to the contract.
+- 2-6 concrete suggestions, highest impact first. Skip micro-nitpicks.
+
+Respond ONLY with a single fenced JSON block:
+{
+  "note": "one-paragraph summary of the highest-value refactor",
+  "suggestions": [
+    {
+      "title": "short imperative title",
+      "category": "structure | performance | clarity",
+      "what": "what to change, concrete and specific to this file",
+      "why": "why it is worth it, grounded in this code"
+    }
+  ]
+}`;
+
+  const user = `[REDGREEN:TASK=refactor]
+Feature: ${opts.feature}
+Test runner: ${opts.runner}
+Module: ${opts.moduleName}
+
+Contract (${opts.typesPath}):
+${opts.typesContent.slice(0, 8_000)}
+
+Implementation (${opts.implPath}):
+${opts.implContent.slice(0, 12_000)}
+
+Passing test suite:
+${opts.testsContent.slice(0, 8_000)}
+${rulesBlock(opts.customRules)}
+Propose behavior-preserving refactors now.`;
+  return { system, user };
+}
+
 export const SOLUTION_SCHEMA = z.object({
   solutionFile: z.string().min(1),
   explanation: z.string().min(1),
