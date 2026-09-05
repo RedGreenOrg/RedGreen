@@ -93,6 +93,13 @@ export function createCleanStdout(out: {
     dirty = false;
   };
 
+  // ink can emit a paint through its log path (erase-lines, cursor moves)
+  // without ever sending the `\x1b[2J…` clear before it; make sure the grid
+  // exists before any content lands so a partial frame can't index a null row.
+  const ensureGrid = (): void => {
+    if (grid.length === 0) resetGrid();
+  };
+
   const put = (ch: string): void => {
     if (curRow < 0 || curRow >= rows || curCol < 0 || curCol >= cols) return;
     dirty = true;
@@ -176,21 +183,43 @@ export function createCleanStdout(out: {
     return s;
   };
 
-  const frame = (): string => {
-    const out: string[] = [];
-    for (let r = 0; r < rows; r++) out.push(rowLine(r));
-    return PAINT + out.join('\n');
+  // Differential emission: only rows that changed since the last emitted
+  // frame are re-written. ink sends `\x1b[2J\x1b[3J\x1b[H` before every
+  // render; forwarding that clear each time is a full-screen flash per
+  // keystroke, which is what makes browsing a list (theme picker, help)
+  // flicker and lag. The first frame clears once; every later frame is
+  // emitted as cursor-move + color-erase + content for its changed rows only,
+  // so a one-row selection movement costs one row of output.
+  let prevGrid: Cell[][] | null = null;
+
+  const rowChanged = (r: number): boolean => {
+    const a = grid[r];
+    const b = prevGrid![r];
+    for (let c = 0; c < cols; c++) {
+      const ca = a[c];
+      const cb = b[c];
+      if (ca.ch !== cb.ch || ca.fg !== cb.fg || ca.bg !== cb.bg || ca.bold !== cb.bold) return true;
+    }
+    return false;
   };
 
   // Emit the current grid as a frame, but only if a paint actually landed in
   // it since the last reset (ink sends cursor-hide and other control
   // sequences before/around paints; those must not produce empty frames).
-  let paintedOnce = false;
   const emitFrame = (): string | null => {
     if (!dirty) return null;
-    paintedOnce = true;
-    const f = frame();
+    const clear =
+      prevGrid === null || prevGrid.length !== grid.length || prevGrid[0].length !== grid[0].length;
+    const parts: string[] = [];
+    if (clear) {
+      for (let r = 0; r < rows; r++) parts.push(rowLine(r));
+    } else {
+      for (let r = 0; r < rows; r++) if (rowChanged(r)) parts.push(rowLine(r));
+    }
+    if (parts.length === 0) return null;
+    const f = (clear ? PAINT : '') + parts.join('\n');
     out.write(f);
+    prevGrid = grid;
     return f;
   };
 
@@ -198,6 +227,7 @@ export function createCleanStdout(out: {
   // paint has been consumed (at the next paint header or a terminator like
   // `\x1b[?25h` / OSC).
   const consume = (): void => {
+    ensureGrid();
     while (pending.length > 0) {
       if (pending.startsWith(PAINT)) {
         emitFrame();
@@ -258,6 +288,13 @@ export function createCleanStdout(out: {
     write(chunk: Buffer | string, _cb?: () => void): boolean {
       pending += chunk.toString('utf8');
       consume();
+      // ink's full-screen path writes the frame as `clearTerminal + content`
+      // with no trailing control sequence, so no terminator ever fires. Flush
+      // whatever was parsed once the chunk has been fully consumed, otherwise
+      // the frame stays cached until the next render and the UI lags one
+      // keystroke behind (theme picker appears only after an arrow key, Enter
+      // visibly moves one extra time).
+      if (pending.length === 0) emitFrame();
       return true;
     },
     end(): void {

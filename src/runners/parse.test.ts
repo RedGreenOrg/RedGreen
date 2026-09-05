@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseJsonReport, parseVitestText, parseJestText, stripAnsi } from './parse.js';
+import {
+  parseJsonReport,
+  parseVitestText,
+  parseJestText,
+  parseMochaText,
+  parseNodeTestText,
+  stripAnsi,
+} from './parse.js';
 
 const VITEST_JSON = {
   numTotalTestSuites: 1,
@@ -124,4 +131,79 @@ test('stripAnsi removes color codes', () => {
 test('parse returns null on unknown output', () => {
   assert.equal(parseVitestText('nothing to see'), null);
   assert.equal(parseJestText('nothing to see'), null);
+  assert.equal(parseMochaText('nothing to see'), null);
+  assert.equal(parseNodeTestText('nothing to see'), null);
+});
+
+const MOCHA_JSON = JSON.stringify({
+  stats: { suites: 1, tests: 4, passes: 2, failures: 1, pending: 1 },
+  failures: [
+    {
+      fullTitle: 'Queue rejects over capacity',
+      err: { message: 'expected false to be true' },
+    },
+  ],
+  passes: [],
+  skipped: [],
+});
+
+test('parseMochaText extracts mocha json report from noisy stdout', () => {
+  const noisy = `some log line\n{"weird":true}\n${MOCHA_JSON}\nexit notes`;
+  const r = parseMochaText(noisy);
+  assert.ok(r);
+  assert.equal(r.passed, 2);
+  assert.equal(r.failed, 1);
+  assert.equal(r.skipped, 1);
+  assert.equal(r.total, 4);
+  assert.equal(r.failures.length, 1);
+  assert.equal(r.failures[0].title, 'Queue rejects over capacity');
+  assert.equal(r.failures[0].message, 'expected false to be true');
+});
+
+test('parseNodeTestText parses TAP trailer counts and not-ok titles', () => {
+  const tap = [
+    'TAP version 13',
+    '# Subtest: accepts burst',
+    'ok 1 - accepts burst',
+    '# Subtest: rejects over limit',
+    'not ok 2 - rejects over limit',
+    '  ---',
+    '  error: expected 10, got 13',
+    '  ...',
+    'ok 3 - # SKIP flaky in ci',
+    '1..3',
+    '# tests 3',
+    '# pass 1',
+    '# fail 1',
+    '# cancelled 0',
+    '# skipped 1',
+  ].join('\n');
+  const r = parseNodeTestText(tap);
+  assert.ok(r);
+  assert.equal(r.total, 3);
+  assert.equal(r.passed, 1);
+  assert.equal(r.failed, 1);
+  assert.equal(r.skipped, 1);
+  assert.deepEqual(
+    r.failures.map((f) => f.title),
+    ['rejects over limit'],
+  );
+});
+
+test('parseNodeTestText falls back to spec-reporter summary lines', () => {
+  const spec = [
+    '\u2716 rejects over limit (1.2ms)',
+    '\u2714 accepts burst (0.4ms)',
+    '\u2139 tests 3',
+    '\u2139 suites 1',
+    '\u2139 pass 2',
+    '\u2139 fail 1',
+    '\u2139 cancelled 0',
+    '\u2139 skipped 0',
+  ].join('\n');
+  const r = parseNodeTestText(spec);
+  assert.ok(r);
+  assert.equal(r.total, 3);
+  assert.equal(r.passed, 2);
+  assert.equal(r.failed, 1);
 });

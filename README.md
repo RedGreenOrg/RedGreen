@@ -2,7 +2,7 @@
 
 Reclaim your coding flow state with **Type-First Ping-Pong TDD**.
 
-RedGreen is an interactive terminal coach that pairs with your editor and test runner to run the full red-green-refactor loop with an AI partner:
+RedGreen is an interactive terminal coach that pairs with your editor and test runner to run a red-green-attack TDD loop with an AI partner:
 
 1. **Type-first scaffold** — you describe a feature; RedGreen generates module + test types via AI.
 2. **RED** — it writes failing tests for the types and verifies they fail on your runner.
@@ -33,8 +33,7 @@ Works with `npm`, `yarn`, `pnpm`, and `bun` (`bunx redgreen`).
 | Command | Description |
 | --- | --- |
 | `redgreen init` | Interactive wizard: provider, model, API key (stored base64-obfuscated in `~/.config/redgreen/config.json`) |
-| `redgreen dev "<feature>"` | Run the TDD loop in the current project (auto-detects vitest/jest) |
-| `redgreen login` | Sign in with GitHub for streaks & the public leaderboard (PKCE + localhost callback) |
+| `redgreen dev "<feature>"` | Run the TDD loop in the current project (auto-detects vitest, jest, mocha, or node:test) |
 
 ### LLM providers
 
@@ -48,6 +47,10 @@ Works with `npm`, `yarn`, `pnpm`, and `bun` (`bunx redgreen`).
 
 Config precedence: **env var > `~/.config/redgreen/config.json`**. Key files never leave your machine (zero-proxy BYOK).
 
+### Stub comments
+
+Scaffolded stubs get contract-explaining JSDoc by default (describing *what* each function should do, never *how*). To generate bare signatures instead, set `"stubComments": false` in `~/.config/redgreen/config.json`, or choose "No" when the init wizard asks.
+
 ### The TDD loop
 
 - Target module is never overwritten; RedGreen only writes the scaffold and the test file.
@@ -55,37 +58,33 @@ Config precedence: **env var > `~/.config/redgreen/config.json`**. Key files nev
 - `REDGREEN_GREEN_TIMEOUT` (default `30`s) controls how long the watcher waits for your implementation.
 - Non-TTY terminals get a headless mode with the same state machine — CI-friendly.
 
-## Leaderboard & streaks
+### Project rules
 
-RedGreen syncs session telemetry (feature name, tests passed, attack rounds survived, time-to-green) to a shared Supabase instance. Streaks update daily; the top 25 developers show on the public leaderboard:
-
-Instances are RLS-guarded: rows are only visible to their owner; the leaderboard exposes aggregate reads. **The anon key ships in the package by design** — it is a public identifier; all data protection comes from RLS.
-
-**Live leaderboard:** https://web-orpin-gamma-szs70xp49v.vercel.app · deploy from `web/` (Vercel/Next.js) with `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY`.
-
-### Bring your own Supabase
-
-Set `SUPABASE_URL` / `SUPABASE_ANON_KEY` env vars (or a `supabase` block in the config file) to override the shared instance:
+Drop a `.redgreen.json` in the project root to steer code generation:
 
 ```jsonc
-// ~/.config/redgreen/config.json
+// .redgreen.json
 {
-  "provider": "openai",
-  "supabase": {
-    "url": "https://your-project.supabase.co",
-    "anonKey": "your-anon-key"
-  }
+  "rules": [
+    "Always add explicit return types",
+    "Use vitest expect-style assertions",
+    "Never throw strings; use Error objects"
+  ]
 }
 ```
 
-Schema lives in [`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) (`gen_random_uuid()`-based, idempotent, re-runnable).
+Rules are injected into every AI prompt (scaffold, red tests, attack rounds, reference solution). Keep them short and directive — max 10 rules.
+
+### Session memory
+
+Finished features are recorded to `.redgreen/history.jsonl` in your project. Future scaffolds include the most relevant past work ("Previously built in this project") so naming and conventions stay consistent across features. Add `.redgreen/` to your `.gitignore` if you don't want history committed.
 
 ## Development
 
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # node:test suite (30 tests)
+npm test            # node:test suite
 npm run build       # tsc -> dist/
 ```
 
@@ -94,9 +93,9 @@ Tests run against temp dirs and never touch your real config.
 ## Roadmap
 
 - [ ] Public npm release (`npm publish`)
-- [ ] Custom prompt rules UI (schema-ready: `custom_rules` table)
-- [ ] pgvector-powered context store for longer sessions
-- [ ] More runner support (mocha, node:test)
+- [x] Custom prompt rules via `.redgreen.json`
+- [x] Local session memory for longer, multi-feature context
+- [x] More runner support (vitest, jest, mocha, node:test)
 
 ## License
 

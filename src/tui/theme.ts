@@ -1,6 +1,3 @@
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { loadConfig, THEME_NAMES, type ThemeName } from '../config/config.js';
 import {
@@ -347,6 +344,21 @@ export const THEMES: Record<ThemeName, Theme> = {
 };
 
 /**
+ * Blend an 8-digit `#RRGGBBAA` color over an opaque background (terminals
+ * have no alpha channel; opencode keeps the RGBA and composites it against
+ * the panel it sits on). A fully opaque color is returned as-is.
+ */
+function blendAlpha(hex8: string, bgHex: string): string {
+  const alpha = parseInt(hex8.slice(7, 9), 16) / 255;
+  if (alpha >= 1) return `#${hex8.slice(1, 7).toLowerCase()}`;
+  const f = [hex8.slice(1, 3), hex8.slice(3, 5), hex8.slice(5, 7)].map((x) => parseInt(x, 16));
+  const b = [bgHex.slice(1, 3), bgHex.slice(3, 5), bgHex.slice(5, 7)].map((x) => parseInt(x, 16));
+  const mix = (fi: number, bi: number): string =>
+    Math.round(fi * alpha + bi * (1 - alpha)).toString(16).padStart(2, '0');
+  return `#${mix(f[0], b[0])}${mix(f[1], b[1])}${mix(f[2], b[2])}`;
+}
+
+/**
  * Convert one of opencode's theme JSON assets into a redgreen Theme.
  * Hex values, `defs`/cross-key references and `{dark, light}` variants are
  * resolved like opencode's own resolveTheme; the variant branch is chosen by
@@ -358,6 +370,9 @@ export const THEMES: Record<ThemeName, Theme> = {
 export function resolveOpenCodeTheme(json: OpenCodeThemeJson, mode: 'dark' | 'light' = 'dark'): Theme {
   const defs = json.defs ?? {};
   const theme = json.theme;
+  // Border (and a few other) tokens use 8-digit alpha hex; those are blended
+  // over the resolved background, so the background must be resolved first.
+  const bgRef: { current: string } = { current: '#000000' };
 
   const resolveValue = (value: OpenCodeColor, mode: 'dark' | 'light', chain: string[]): string | undefined => {
     if (typeof value === 'object') {
@@ -366,6 +381,7 @@ export function resolveOpenCodeTheme(json: OpenCodeThemeJson, mode: 'dark' | 'li
     if (typeof value !== 'string') return undefined;
     const v = value.trim();
     if (v === 'transparent' || v === 'none') return undefined;
+    if (/^#[0-9a-fA-F]{8}$/.test(v)) return blendAlpha(v, bgRef.current);
     if (/^#[0-9a-fA-F]{6}$/.test(v)) return v.toLowerCase();
     if (chain.includes(v)) return undefined;
     const ref = defs[v] ?? (theme[v] as OpenCodeColor | undefined);
@@ -375,6 +391,8 @@ export function resolveOpenCodeTheme(json: OpenCodeThemeJson, mode: 'dark' | 'li
 
   const resolveKey = (key: string, mode: 'dark' | 'light'): string | undefined =>
     resolveValue(theme[key] as OpenCodeColor, mode, []);
+
+  bgRef.current = resolveKey('background', mode) ?? '#000000';
 
   const result: Partial<Theme> = {};
   for (const key of OT_KEYS) result[key] = resolveKey(key, mode);
@@ -388,12 +406,23 @@ export function resolveOpenCodeTheme(json: OpenCodeThemeJson, mode: 'dark' | 'li
  * COLORFGBG (env) wins over the OSC query: it is the terminal's explicit
  * statement of the current color scheme, while OSC replies can be stale,
  * defaults, or absent. When nothing is reported, the Windows system theme
- * is used as a last resort. Set REDGREEN_DEBUG_COLORS=1 to print what was
- * read and append it to %TEMP%\redgreen-theme-debug.log.
+ * is used as a last resort. Set REDGREEN_THEME_MODE=dark|light to force the
+ * opencode assets' variant branch. Set REDGREEN_QUERY_COLORS=1 to also run
+ * the OSC color query where COLORFGBG is unavailable.
  */
 export async function installSystemTheme(): Promise<void> {
   const env = envTerminalColors();
-  const queried = process.env.REDGREEN_SKIP_COLOR_QUERY === '1' ? { palette: [] } : await queryTerminalColors();
+  // On Windows, COLORFGBG states the active color scheme outright; the OSC
+  // round-trip has nothing to add and writes escape bytes straight to the
+  // terminal before the TUI's clean writer is installed (they can be echoed
+  // as raw garbage on startup). Only query when the terminal gave us nothing
+  // AND the user explicitly asked (REDGREEN_QUERY_COLORS=1), so the default
+  // startup never emits raw OSC bytes.
+  const allowQuery = process.env.REDGREEN_SKIP_COLOR_QUERY !== '1';
+  const requestQuery = process.env.REDGREEN_QUERY_COLORS === '1';
+  const queried = allowQuery && requestQuery && !env.defaultBackground
+    ? await queryTerminalColors()
+    : { palette: [] };
   const colors: TerminalColors = {
     defaultBackground: env.defaultBackground ?? queried.defaultBackground,
     defaultForeground: env.defaultForeground ?? queried.defaultForeground,
@@ -414,30 +443,6 @@ export async function installSystemTheme(): Promise<void> {
         : 'light';
   for (const name of OPENCODE_THEME_NAMES) {
     THEMES[name] = resolveOpenCodeTheme(OPENCODE_THEMES[name], opencodeMode);
-  }
-  if (process.env.REDGREEN_DEBUG_COLORS === '1') {
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      colorFgBg: process.env.COLORFGBG ?? null,
-      env,
-      queried: {
-        defaultBackground: queried.defaultBackground ?? null,
-        defaultForeground: queried.defaultForeground ?? null,
-        palette: queried.palette.filter(Boolean).length,
-      },
-      colors,
-      fallback,
-    });
-    console.error(
-      `[redgreen] colors: bg=${colors.defaultBackground ?? '(none)'} fg=${colors.defaultForeground ?? '(none)'} ` +
-        `osc=${process.env.REDGREEN_SKIP_COLOR_QUERY === '1' ? 'skipped' : 'queried'} ` +
-        `COLORFGBG=${process.env.COLORFGBG ?? '(absent)'} fallback=${fallback}`,
-    );
-    try {
-      fs.appendFileSync(path.join(os.tmpdir(), 'redgreen-theme-debug.log'), line + '\n');
-    } catch {
-      /* ignore logging errors */
-    }
   }
 }
 

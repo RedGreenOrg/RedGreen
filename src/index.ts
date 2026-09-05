@@ -2,7 +2,6 @@
 import { Command } from 'commander';
 import { initCommand } from './commands/init.js';
 import { devCommand } from './commands/dev.js';
-import { loginCommand } from './commands/login.js';
 
 const program = new Command();
 
@@ -13,6 +12,5 @@ program
 
 program.addCommand(initCommand);
 program.addCommand(devCommand);
-program.addCommand(loginCommand);
 
 await program.parseAsync(process.argv);

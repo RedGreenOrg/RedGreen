@@ -42,6 +42,39 @@ const STUB = {
       "    expect(rl.check('a')).toBe(true);\n" +
       "  });\n" +
       "});",
+    hints: {
+      small: "The second test ('flags requests over the limit') calls check twice for the same key - look at what state must persist between those calls.",
+      medium:
+        "Track how many times each key has been seen recently. You need somewhere to store per-key counts, and a way to expire them so old hits stop counting after the window passes.",
+      big:
+        "createRateLimiter(opts):\n" +
+        "  store = new Map(key -> timestamps[])\n" +
+        "  check(key):\n" +
+        "    now = Date.now()\n" +
+        "    arr = store.get(key) ?? []\n" +
+        "    arr = arr.filter(t -> now - t < windowMs)\n" +
+        "    if arr.length >= max: store.set(key, arr); return true\n" +
+        "    arr.push(now); store.set(key, arr); return false",
+    },
+  }),
+  solution: JSON.stringify({
+    solutionFile:
+      "import type { RateLimiter } from './rateLimiter.types';\n" +
+      "export function createRateLimiter(opts: { max: number; windowMs: number }): RateLimiter {\n" +
+      "  const hits = new Map<string, number[]>();\n" +
+      "  return {\n" +
+      "    check(key: string): boolean {\n" +
+      "      const now = Date.now();\n" +
+      "      const recent = (hits.get(key) ?? []).filter((t) => now - t < opts.windowMs);\n" +
+      "      if (recent.length >= opts.max) { hits.set(key, recent); return true; }\n" +
+      "      recent.push(now);\n" +
+      "      hits.set(key, recent);\n" +
+      "      return false;\n" +
+      "    },\n" +
+      "  };\n" +
+      "}",
+    explanation:
+      "A sliding window with per-key timestamp arrays is the clearest fit: each check prunes expired timestamps and compares the count against max. A Map keeps lookups O(1); memory is bounded by the number of active keys in a window.",
   }),
   attack: JSON.stringify({
     testFile:
@@ -61,6 +94,7 @@ const STUB = {
 async function stubChat(turn: ChatTurn): Promise<string> {
   const user = turn.user ?? '';
   if (user.includes('REDGREEN:TASK=scaffold')) return STUB.scaffold;
+  if (user.includes('REDGREEN:TASK=solution')) return STUB.solution;
   if (user.includes('REDGREEN:TASK=attack')) return STUB.attack;
   return STUB.red;
 }

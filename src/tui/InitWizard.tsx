@@ -12,7 +12,12 @@ const PROVIDER_ITEMS: { label: string; value: LlmProvider }[] = [
   { label: 'Ollama (local, no API key)', value: 'ollama' },
 ];
 
-type Step = 'provider' | 'model' | 'key' | 'confirm';
+type Step = 'provider' | 'model' | 'key' | 'stubs' | 'confirm';
+
+const STUB_ITEMS: { label: string; value: boolean }[] = [
+  { label: 'Yes - JSDoc explains WHAT each function should do', value: true },
+  { label: 'No - bare signatures only', value: false },
+];
 
 export interface InitWizardProps {
   onDone: (config: RedGreenConfig) => void;
@@ -23,6 +28,7 @@ export function InitWizard({ onDone }: InitWizardProps): React.ReactElement {
   const [provider, setProvider] = useState<LlmProvider | null>(null);
   const [model, setModel] = useState('');
   const [key, setKey] = useState('');
+  const [stubComments, setStubComments] = useState<boolean>(true);
 
   useInput((input) => {
     if (step !== 'confirm' || !provider) return;
@@ -31,6 +37,7 @@ export function InitWizard({ onDone }: InitWizardProps): React.ReactElement {
         provider,
         model: model || PROVIDER_MODELS[provider],
         apiKey: key.trim() || undefined,
+        stubComments,
       });
     }
   });
@@ -83,10 +90,24 @@ export function InitWizard({ onDone }: InitWizardProps): React.ReactElement {
             placeholder=""
             onSubmit={(value) => {
               setKey(value);
-              setStep('confirm');
+              setStep('stubs');
             }}
           />
           <Text dimColor>Enter to confirm (stored obfuscated locally)</Text>
+        </Box>
+      )}
+
+      {step === 'stubs' && (
+        <Box flexDirection="column" marginTop={1}>
+          <Text>Annotate stubs with contract-explaining JSDoc?</Text>
+          <SelectInput
+            items={STUB_ITEMS}
+            onSelect={(item) => {
+              setStubComments(item.value);
+              setStep('confirm');
+            }}
+          />
+          <Text dimColor>Comments describe WHAT to build, never HOW</Text>
         </Box>
       )}
 
@@ -106,6 +127,10 @@ export function InitWizard({ onDone }: InitWizardProps): React.ReactElement {
             <Text color="cyan">
               {key.trim() ? '****' + key.trim().slice(-4) : `from ${keyHint} (env / none)`}
             </Text>
+          </Text>
+          <Text>
+            {'  Stubs:    '}
+            <Text color="cyan">{stubComments ? 'with JSDoc hints' : 'bare signatures'}</Text>
           </Text>
           <Box marginTop={1}>
             <Text dimColor>Press Enter to save to ~/.config/redgreen/config.json</Text>
