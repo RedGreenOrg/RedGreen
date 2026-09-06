@@ -54,7 +54,7 @@ Works with `npm`, `yarn`, `pnpm`, and `bun` (`bunx redgreen`).
 
 ### Tutorial
 
-`redgreen tutorial` creates a `redgreen-tutorial/` sandbox, installs vitest, and walks you through the full loop with a deterministic stub AI — no API key or config required. Each phase explains *what* is about to happen and *why*, in a banner under the header:
+`redgreen tutorial` creates a `redgreen-tutorial/` sandbox, installs vitest, and walks you through the full loop with a deterministic stub AI — no API key or config required. A coach banner opens at the start of each phase with *what* is about to happen, *why* it matters, and the keys you'll need — one `enter` both dismisses it and advances the phase:
 
 ```bash
 $ npx redgreen tutorial
@@ -84,14 +84,19 @@ Config precedence: **env var > `~/.config/redgreen/config.json`**. Keys never le
 
 ### In the loop
 
-- `enter` — approve a contract / move to the next phase
-- `h` — reveal the next Nudge hint (points, never solutions)
-- `s` / `S` — reveal / hide the reference solution
-- `v` — view refactor suggestions
-- `a` — auto-apply the next refactor (suite-verified first; you approve the result)
+- `enter` — approve a contract / move to the next phase (also dismisses the tutorial coach in the same press)
 - `q` — quit
+- `s` — skip the current step
+- `h` — reveal the next Nudge hint (points, never solutions)
+- `S` — reveal the reference solution (locked until you reach GREEN)
+- `v` — view the RED tests or the refactor suggestions
+- `a` — accept a verified refactor, or auto-apply the next one (suite-verified first)
+- `r` — reject a pending refactor, or retry a failed step
+- `j`/`k` — scroll the event log; `g` — jump back to the live log
+- `?` — key reference; `/` — command input (`/help`, `/skip`, `/new "<feature>"`, …)
+- `t` — switch themes
 
-Hints escalate as you put in effort: **small** (where to look) is always available, **medium** (the approach) after your first failed run, **big** (pseudocode) after your second. Once you're green, all tiers are open. Hints re-derive against the current failing assertion each time you press `h`, so they track the problem you're actually fighting.
+Nudges escalate as you put in effort: **small** (where to look) is always available, **medium** (the approach) after your first failed run, **big** (pseudocode) after your second. Once you're green, all tiers are open. Hints re-derive against the current failing assertion each time you press `h`, so they track the problem you're actually fighting.
 
 ### Stub comments
 
