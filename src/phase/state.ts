@@ -10,6 +10,17 @@ export type PhaseId = (typeof PHASES)[number]['id'];
 
 export type PhaseStatus = 'pending' | 'active' | 'done' | 'error' | 'soon';
 
+/**
+ * The phase the user is currently in: the one marked active, else the last
+ * phase that has started, else the first phase.
+ */
+export function currentPhase(statuses: Record<PhaseId, PhaseStatus>): PhaseId {
+  const active = PHASES.find((p) => statuses[p.id] === 'active');
+  if (active) return active.id;
+  const last = [...PHASES].reverse().find((p) => statuses[p.id] !== 'pending');
+  return last ? last.id : PHASES[0].id;
+}
+
 export function initialStatuses(startAt: PhaseId): Record<PhaseId, PhaseStatus> {
   const st: Record<PhaseId, PhaseStatus> = {
     scaffold: 'pending',

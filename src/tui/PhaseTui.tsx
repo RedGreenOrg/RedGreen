@@ -5,12 +5,28 @@ import { render } from 'ink';
 import { DevSession, type SessionEvent } from '../core/session.js';
 import type { SessionSnapshot } from '../core/session.js';
 import type { ChatFn } from '../llm/client.js';
-import { PHASES, type PhaseId, type PhaseStatus } from '../phase/state.js';
+import { PHASES, currentPhase, type PhaseId, type PhaseStatus } from '../phase/state.js';
 import type { TestRunner } from '../runners/types.js';
 import { THEME_NAMES, updateTheme, type ThemeName } from '../config/config.js';
 import { THEMES, installSystemTheme, resolveThemeName, type Theme } from './theme.js';
 import { SENT, createCleanStdout } from './screen.js';
 import type { HintTier, Hints, RefactorSuggestions } from '../prompts/prompts.js';
+
+export interface TutorialStep {
+  /** One-line what-is-happening headline, shown in the header banner. */
+  what: string;
+  /** Why this phase matters (shown in the phase guide overlay). */
+  why: string;
+  /** What the user is supposed to do right now (guide overlay). */
+  do: string;
+  /** Relevant keys while in this phase (guide overlay). */
+  keys: string;
+}
+
+export interface TutorialConfig {
+  /** Per-phase guidance shown in the header banner and the phase guide overlay. */
+  steps: Record<PhaseId, TutorialStep>;
+}
 
 export interface PhaseTuiProps {
   feature: string;
@@ -19,6 +35,8 @@ export interface PhaseTuiProps {
   cwd?: string;
   provider?: string;
   stubComments?: boolean;
+  /** When set, renders a phase-by-phase teaching banner instead of the plain UI. */
+  tutorial?: TutorialConfig;
 }
 
 function formatElapsed(ms: number): string {
@@ -46,15 +64,15 @@ function formatResult(ev: SessionEvent & { type: 'result' }): {
 }
 
 function StatusPill({ statuses, theme }: { statuses: Record<PhaseId, PhaseStatus>; theme: Theme }): React.ReactElement {
-  const active = PHASES.find((p) => statuses[p.id] === 'active');
-  const current = active ?? [...PHASES].reverse().find((p) => statuses[p.id] !== 'pending') ?? PHASES[0];
-  const st = statuses[current.id];
+  const phase = currentPhase(statuses);
+  const st = statuses[phase];
   const marker = st === 'active' ? '▸' : st === 'done' ? '✓' : st === 'error' ? '✗' : ' ';
   const color =
     st === 'active' ? theme.primary : st === 'done' ? theme.success : st === 'error' ? theme.error : theme.textMuted;
+  const label = PHASES.find((p) => p.id === phase)!.label;
   return (
     <Text bold color={color}>
-      [{marker} {current.label.toUpperCase()}]
+      [{marker} {label.toUpperCase()}]
     </Text>
   );
 }
@@ -63,168 +81,237 @@ function StatusPill({ statuses, theme }: { statuses: Record<PhaseId, PhaseStatus
 // Every marker ('▸', '✓', '✗', ' ') is a single cell, so the pill is always
 // '[' + marker + ' ' + label + ']' = label.length + 4.
 function pillLen(statuses: Record<PhaseId, PhaseStatus>): number {
-  const active = PHASES.find((p) => statuses[p.id] === 'active');
-  const current = active ?? [...PHASES].reverse().find((p) => statuses[p.id] !== 'pending') ?? PHASES[0];
-  return current.label.length + 4;
+  const phase = currentPhase(statuses);
+  const label = PHASES.find((p) => p.id === phase)!.label;
+  return label.length + 4;
+}
+
+// Pop-up coach shown the first time each phase is entered during a tutorial:
+// what is happening, why, what the user must do right now, and which keys
+// matter. Dismiss with enter / space / esc / q.
+function PhaseGuideOverlay({
+  step,
+  label,
+  idx,
+  theme,
+  maxCols,
+  onClose,
+}: {
+  step: TutorialStep;
+  label: string;
+  idx: number;
+  theme: Theme;
+  maxCols: number;
+  onClose: () => void;
+}): React.ReactElement {
+  useInput((input) => {
+    if (input === '\r' || input === ' ' || input === '\u001b' || input === 'q' || input === 'g') onClose();
+  });
+  const fill = theme.backgroundElement;
+  const title = `TUTORIAL · STEP ${idx}/${PHASES.length} · ${label.toUpperCase()}`;
+  const rows: Array<[string, string]> = [
+    ['WHAT', step.what],
+    ['WHY', step.why],
+    ['YOU', step.do],
+    ['KEYS', step.keys],
+  ];
+  const dismiss = 'press enter / space / esc to continue';
+  // The modal must always fit the terminal (ink wraps by default, which makes
+  // a too-wide overlay wrap mid-word on narrow windows). Cap the box width
+  // and truncate every line to it so it renders as single lines everywhere.
+  const MAX = Math.max(28, maxCols - 6);
+  const cw = Math.min(
+    MAX,
+    Math.max(
+      0,
+      2 + title.length,
+      ...rows.map(([k, v]) => 2 + k.length + 1 + v.length),
+      2 + dismiss.length,
+    ),
+  ) + 1;
+  const tail = (contentLen: number): React.ReactElement => (
+    <>
+      {pad(cw - contentLen - 1)}
+      <Block color={fill} />
+    </>
+  );
+  return (
+    <Text backgroundColor={fill}>
+      {tail(0)}
+      {'\n'}
+      <Text bold color={theme.info}>
+        {pad(2)}
+        {truncate(title, cw - 4)}
+      </Text>
+      {tail(2 + truncate(title, cw - 4).length)}
+      {'\n'}
+      {rows.map(([k, v], i) => {
+        const vlen = truncate(v, cw - 2 - k.length - 1 - 2);
+        return (
+          <React.Fragment key={i}>
+            <Text bold color={theme.primary}>{pad(2)}{k}</Text>
+            <Text color={theme.text}>{' '}{vlen}</Text>
+            {tail(2 + k.length + 1 + vlen.length)}
+            {i === rows.length - 1 ? '' : '\n'}
+          </React.Fragment>
+        );
+      })}
+      {'\n'}
+      <Text color={theme.textMuted}>{pad(2)}{truncate(dismiss, cw - 4)}</Text>
+      {tail(2 + truncate(dismiss, cw - 4).length)}
+      {'\n'}
+    </Text>
+  );
 }
 
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, Math.max(0, n - 1)) + '…' : s;
 }
 
-// One full-width filled line. `base` fills the row like the app background so
-// no terminal pixels show through; without it (system theme) the row is plain.
+// One row of the timeline log. Every event paints one full-width panel line so
+// the region reads as a single gray console (not patchy per-line stripes).
+// Long messages are truncated to the row width; nothing wraps or overflows.
 function EventLine({
   ev,
   isLast,
   expanded,
   theme,
   w,
+  slice,
 }: {
   ev: SessionEvent;
   isLast: boolean;
   expanded: boolean;
   theme: Theme;
   w: number;
+  slice?: [number, number];
 }): React.ReactElement {
+  // The timeline is a plain log: rows sit on the base background (no gray
+  // panel), each event contributing one line per entry (failures expand into
+  // their own inline rows). Every row is its own <Text> so the visible window
+  // can cut a block mid-way for smooth line-based scrolling.
   const base = theme.background;
-  // `last` suppresses the trailing '\n'; a lone single-line event line that
-  // ends with '\n' leaves a dangling unstyled empty row (bright terminal
-  // background peeks through). Events stack as separate Text nodes, so a
-  // trailing newline is only needed BETWEEN lines inside one Text.
-  // `offset` is the content's column; everything else on the row is painted
-  // with base-colored spaces so no glyph shapes are selectable. The last cell
-  // is a base-colored block that prevents ink's trailing-trim from shrinking
-  // the row.
-  const tail = (offset: number, contentLen: number, last = false): React.ReactNode => (
-    <>
-      {base ? (
-        <>
-          {pad(w - offset - contentLen - 1)}
-          <Block color={base} />
-        </>
-      ) : null}
-      {last ? null : '\n'}
-    </>
+  const row = (children: React.ReactNode, len: number): React.ReactElement => (
+    <Text backgroundColor={base}>
+      {children}
+      {pad(w - len)}
+    </Text>
   );
+  const msg = (m: string): string => truncate(m.split('\n')[0].trim(), w - 5);
+  const failRow = (f: { title: string; file: string; message?: string }): React.ReactElement => {
+    const mline = f.message ? f.message.split('\n')[0].trim() : '';
+    const title = truncate(f.title, w - 3 - 2);
+    const both = title + (mline.length > 0 ? ` · ${truncate(mline, Math.max(4, w - 3 - 2 - title.length - 3))}` : '');
+    const t = truncate(both, w - 3 - 1 - 2);
+    return row(
+      <>
+        {pad(6)}
+        <Text color={theme.error}>✗</Text>
+        <Text color={theme.textMuted}> {t}</Text>
+      </>,
+      6 + 1 + 1 + t.length,
+    );
+  };
+  let rows: React.ReactElement[] = [];
   switch (ev.type) {
-    case 'write':
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={theme.success}>
-            [+]
-          </Text>
-          <Text color={theme.textMuted}> {ev.message}</Text>
-          {tail(5, 3 + 1 + ev.message.length, true)}
-        </Text>
-      );
-    case 'info':
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={theme.textMuted}>
-            [i]
-          </Text>
-          <Text color={theme.textMuted}> {ev.message}</Text>
-          {tail(5, 3 + 1 + ev.message.length, true)}
-        </Text>
-      );
-    case 'error':
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={theme.error}>
-            [!]
-          </Text>
-          <Text color={theme.error}> {ev.message}</Text>
-          {tail(5, 3 + 1 + ev.message.length, true)}
-        </Text>
-      );
+    case 'write': {
+      const m = msg(ev.message);
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={theme.success}>[+]</Text>
+          <Text color={theme.text}> {m}</Text>
+        </>,
+        3 + 3 + 1 + m.length,
+      )];
+      break;
+    }
+    case 'info': {
+      const m = msg(ev.message);
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={theme.textMuted}>[i]</Text>
+          <Text color={theme.textMuted}> {m}</Text>
+        </>,
+        3 + 3 + 1 + m.length,
+      )];
+      break;
+    }
+    case 'error': {
+      const m = msg(ev.message);
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={theme.error}>[!]</Text>
+          <Text color={theme.error}> {m}</Text>
+        </>,
+        3 + 3 + 1 + m.length,
+      )];
+      break;
+    }
     case 'summary': {
+      const m = msg(ev.message);
       const color = ev.green ? theme.success : theme.error;
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={color}>
-            [■]
-          </Text>
-          <Text bold color={color}>
-            {' '}
-            {ev.message}
-          </Text>
-          {tail(5, 3 + 1 + ev.message.length, true)}
-        </Text>
-      );
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={color}>[■]</Text>
+          <Text bold color={color}> {m}</Text>
+        </>,
+        3 + 3 + 1 + m.length,
+      )];
+      break;
     }
     case 'attack': {
-      const msg = ` attack round ${ev.round}/${ev.total} - ${ev.survived ? 'survived' : 'failed'}`;
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={ev.survived ? theme.success : theme.error}>
-            [{ev.survived ? '✓' : '✗'}]
-          </Text>
-          <Text color={ev.survived ? theme.success : theme.error}>{msg}</Text>
-          {tail(5, 3 + msg.length, true)}
-        </Text>
-      );
+      const m = ` attack round ${ev.round}/${ev.total} - ${ev.survived ? 'survived' : 'failed'}`;
+      const m2 = truncate(m, w - 5);
+      const color = ev.survived ? theme.success : theme.error;
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={color}>[{ev.survived ? '✓' : '✗'}]</Text>
+          <Text color={color}>{m2}</Text>
+        </>,
+        3 + 3 + m2.length,
+      )];
+      break;
     }
     case 'refactor': {
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={theme.info}>
-            [R]
-          </Text>
-          <Text color={theme.info}> {ev.message}</Text>
-          {tail(5, 3 + 1 + ev.message.length, true)}
-        </Text>
-      );
+      const m = msg(ev.message);
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={theme.info}>[R]</Text>
+          <Text color={theme.info}> {m}</Text>
+        </>,
+        3 + 3 + 1 + m.length,
+      )];
+      break;
     }
     case 'result': {
       const { verdict, label, detail } = formatResult(ev);
       const color = verdict === 'green' ? theme.success : verdict === 'red' ? theme.error : theme.textMuted;
       const expandedAny = expanded && isLast && ev.result.failures.length > 0;
       const failures = ev.result.failures.slice(0, 4);
-      return (
-        <Text backgroundColor={base}>
-          {base ? pad(5) : null}
-          <Text bold color={color}>
-            [{label}{expandedAny ? '-' : ''}]
-          </Text>
-          <Text color={color}>
-            {' '}
-            {detail}
-          </Text>
-          {tail(5, 3 + (expandedAny ? 1 : 0) + 1 + detail.length, failures.length === 0 || !expandedAny)}
-          {expandedAny &&
-            failures.map((f, i) => {
-              const lastF = i === failures.length - 1;
-              const msg = f.message ? f.message.split('\n')[0] : '';
-              return (
-                <Text key={f.title + f.file}>
-                  {base ? pad(9) : null}
-                  <Text color={theme.error}>
-                    [✗] {truncate(f.title, w - 16)}
-                  </Text>
-                  {tail(9, 4 + truncate(f.title, w - 16).length, lastF && msg.length === 0)}
-                  {msg.length > 0 && (
-                    <>
-                      {base ? pad(13) : null}
-                      <Text color={theme.warning}>{truncate(msg, w - 16)}</Text>
-                      {tail(13, truncate(msg, w - 16).length, lastF)}
-                    </>
-                  )}
-                </Text>
-              );
-            })}
-        </Text>
-      );
+      const d = truncate(detail, w - 5);
+      rows = [row(
+        <>
+          {pad(3)}
+          <Text bold color={color}>[{label}{expandedAny ? '-' : ''}]</Text>
+          <Text color={color}> {d}</Text>
+        </>,
+        3 + 3 + (expandedAny ? 1 : 0) + 1 + d.length,
+      )];
+      if (expandedAny) rows = rows.concat(failures.map(failRow));
+      break;
     }
     default:
-      return <React.Fragment />;
+      break;
   }
+  const f = Math.max(0, slice?.[0] ?? 0);
+  const t = Math.min(rows.length, slice?.[1] ?? rows.length);
+  return <React.Fragment>{rows.slice(f, t).map((r, i) => <React.Fragment key={f + i}>{r}</React.Fragment>)}</React.Fragment>;
 }
 
 const HELP_LINES: Array<[string, string]> = [
@@ -715,12 +802,16 @@ export function TestReviewOverlay({
 export function RefactorOverlay({
   data,
   onClose,
+  onApply,
+  onReject,
   theme,
   maxCols,
   maxRows,
 }: {
   data: RefactorSuggestions;
   onClose: () => void;
+  onApply: () => void;
+  onReject: () => void;
   theme: Theme;
   maxCols: number;
   maxRows: number;
@@ -728,6 +819,14 @@ export function RefactorOverlay({
   const [scroll, setScroll] = useState(0);
   useInput((input, key) => {
     if (key.escape || input === 'q' || input === 'v') return onClose();
+    if (input === 'a') {
+      onApply();
+      return onClose();
+    }
+    if (input === 'r') {
+      onReject();
+      return onClose();
+    }
     if (input === 'j' || key.downArrow) setScroll((v) => v + 1);
     if (input === 'k' || key.upArrow) setScroll((v) => Math.max(0, v - 1));
     if (input === 'G') setScroll((v) => v + 8);
@@ -802,7 +901,15 @@ export function RefactorOverlay({
   );
 }
 
-export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }: PhaseTuiProps): React.ReactElement {
+export function PhaseTui({
+  feature,
+  runner,
+  chat,
+  cwd,
+  provider,
+  stubComments,
+  tutorial,
+}: PhaseTuiProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const rows = stdout?.rows ?? 24;
@@ -827,18 +934,22 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   const [showSolution, setShowSolution] = useState(false);
   const [showRefactor, setShowRefactor] = useState(false);
   const [showTestReview, setShowTestReview] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [clock, setClock] = useState(() => new Date().toTimeString().slice(0, 8));
   const statusTimer = useRef<NodeJS.Timeout | null>(null);
+  // Tutorial coach modals auto-show once per phase (in order), then stay seen.
+  const seenGuideRef = useRef<Set<PhaseId>>(new Set());
   // While the picker is up, render the whole screen with the hovered theme
   // so moving the selection (j/k) live-previews each theme.
   const theme = THEMES[showThemes ? THEME_NAMES[themesSel] : themeName];
-  // While an overlay (help/themes) is up, freeze background churn (clock
+  // While an overlay (help/themes/guide) is up, freeze background churn (clock
   // tick, session updates): each setState there repaints the whole frame,
   // which is what flickers/lags when browsing a large list.
   const overlayRef = useRef(false);
-  overlayRef.current = showHelp || showThemes || showHints || showSolution || showRefactor || showTestReview;
+  overlayRef.current =
+    showHelp || showThemes || showHints || showSolution || showRefactor || showTestReview || showGuide;
 
   useEffect(() => {
     if (!sessionRef.current) return;
@@ -846,7 +957,9 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     const onUpdate = (sn: SessionSnapshot) => {
       if (overlayRef.current) return;
       setSnap(sn);
-      setScroll(0);
+      // Keep the scroll anchor across updates: at the bottom (0) events follow
+      // live; when the user scrolled up, hold their position instead of
+      // snapping them back down on every new line.
     };
     s.on('update', onUpdate);
     void s.start();
@@ -863,6 +976,16 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     };
   }, [exit]);
 
+  // Show the tutorial coach once per phase, as soon as the session enters it.
+  const guidePhase = currentPhase(snap.statuses);
+  useEffect(() => {
+    if (!tutorial) return;
+    if (showHelp || showThemes || showHints || showSolution || showRefactor || showTestReview || inputMode) return;
+    if (seenGuideRef.current.has(guidePhase)) return;
+    seenGuideRef.current.add(guidePhase);
+    setShowGuide(true);
+  }, [guidePhase, tutorial, showHelp, showThemes, showHints, showSolution, showRefactor, showTestReview, inputMode]);
+
   const startNewFeature = (feat: string): void => {
     const s = sessionRef.current;
     if (!s) return;
@@ -872,6 +995,8 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
     setShowThemes(false);
     setShowRefactor(false);
     setShowTestReview(false);
+    setShowGuide(false);
+    seenGuideRef.current = new Set();
     setExpanded(true);
     setScroll(0);
     setStatusMsg(null);
@@ -884,6 +1009,15 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
       const s = sessionRef.current;
       if (!s) return;
       if (showHelp || showThemes || showHints || showSolution || showRefactor) return;
+      if (showGuide) {
+        // The coach itself closes on enter/space; forward the same press as an
+        // approve so advancing the phase never needs a second keypress.
+        if (input === '\r' || input === ' ') {
+          setShowGuide(false);
+          return s.approve();
+        }
+        return;
+      }
       if (inputMode) {
         if (key.escape) {
           setInputMode(false);
@@ -1066,7 +1200,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
         return;
       }
       if (input === 'j' || key.downArrow) {
-        setScroll((v) => Math.min(Math.max(0, snap.events.length - 1), v + 1));
+        setScroll((v) => Math.min(Math.max(0, total - maxEventsRows), v + 1));
         return;
       }
       if (input === 'k' || key.upArrow) {
@@ -1083,8 +1217,9 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   // header gap (1) + statusMsg row (1) + footer gap (1) + footer (4:
   // pad+keys/input+status+pad) + bottom status row (1) + bottom gap (1) = 14
   // rows reserve. The prompt now lives in the footer command box, so the
-  // timeline gets all of its rows back.
-  const timelineHeight = Math.max(4, rows - 14);
+  // timeline gets all of its rows back. The tutorial hint adds 1 more line.
+  const tutorialRows = tutorial ? 1 : 0;
+  const timelineHeight = Math.max(4, rows - 14 - tutorialRows);
   const cols = stdout?.columns ?? 80;
   const w = Math.max(40, cols);
   const panel = theme.backgroundPanel;
@@ -1093,17 +1228,40 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   const linesOf = (ev: SessionEvent): number => {
     if (ev.type !== 'result') return 1;
     const expandedAny = expanded && ev === events[events.length - 1] && ev.result.failures.length > 0;
-    return expandedAny ? 1 + Math.min(4, ev.result.failures.length) * 2 : 1;
+    return expandedAny ? 1 + Math.min(4, ev.result.failures.length) : 1;
   };
-  const endIdx = events.length - scroll;
-  let lineCount = 0;
+  // Line-based windowing: scroll counts lines, not events, so j/k slide the
+  // log one row at a time instead of popping whole event blocks in/out.
+  const lens = events.map(linesOf);
+  const starts: number[] = [0];
+  for (let i = 0; i < lens.length; i++) starts.push(starts[i] + lens[i]);
+  const total = starts[starts.length - 1];
+  const scrolled = Math.max(0, Math.min(scroll, Math.max(0, total - maxEventsRows)));
+  const bottom = total - scrolled;
+  const top = Math.max(0, bottom - maxEventsRows);
   const visible: SessionEvent[] = [];
-  for (let i = endIdx - 1; i >= 0 && lineCount < maxEventsRows; i--) {
-    lineCount += linesOf(events[i]);
+  const slices: number[][] = [];
+  for (let i = 0; i < events.length; i++) {
+    const s = starts[i];
+    const e = starts[i + 1];
+    if (e <= top) continue;
+    if (s >= bottom) break;
     visible.push(events[i]);
+    slices.push([Math.max(0, top - s), Math.min(lens[i], bottom - s)]);
   }
-  visible.reverse();
-  const slack = Math.max(0, maxEventsRows - lineCount);
+  const slack = Math.max(0, maxEventsRows - (bottom - top));
+  // Tutorial hint line (shown in the header box) + the coach modal state.
+  const guideIdx = PHASES.findIndex((p) => p.id === guidePhase) + 1;
+  const guideStep = tutorial ? tutorial.steps[guidePhase] : undefined;
+  const bannerWhat =
+    guideStep && tutorial
+      ? truncate(` · ${guideIdx}/${PHASES.length} · ${guideStep.what}`, w - 2 * M - P - 8 - T)
+      : '';
+  const scrolledUp = scrolled > 0;
+  const statusMsgLeft = scrolledUp
+    ? `▲ ${scrolled} older · G to go live`
+    : statusMsg;
+  const statusMsgLen = statusMsgLeft?.length ?? 0;
   const statusLeft = `${provider ?? 'configured'} · ${runner} · ${formatElapsed(elapsed)} · attacks ${snap.attackRoundsSurvived}/3${
     result ? ` · last ${result.failed} failed, ${result.passed} passed` : ''
   }`;
@@ -1135,7 +1293,7 @@ export function PhaseTui({ feature, runner, chat, cwd, provider, stubComments }:
   // while the timeline scrolls independently.
   const footerText = prompt ?? keysHint;
   const footerColor = prompt ? theme.warning : theme.textMuted;
-  const footerMax = w - 2 * M - 1 - 2 - T;
+  const footerMax = w - 2 * M - 2 - 2 - T;
   const footerDisplay = truncate(footerText, footerMax);
   const featureContent =
     9 + feature.length + (moduleName ? 10 + moduleName.length : 0);
@@ -1159,27 +1317,32 @@ const mainScreen = (
       <Box flexDirection="column">
         <Text backgroundColor={base}>
           {pad(M)}
+          <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
-            {pad(w - 2 * M)}
+            {pad(w - 2 * M - 2)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
         <Text backgroundColor={base}>
           {pad(M)}
+          <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
             {pad(P)}
             <Text bold color={theme.text}>redgreen </Text>
-            <Text bold color={theme.success}>dev</Text>
-            {pad(w - 2 * M - P - 12 - pillLen(statuses) - T)}
+            <Text bold color={theme.success}>{tutorial ? 'tutorial' : 'dev'}</Text>
+            {pad(w - 2 * M - 2 - P - (tutorial ? 17 : 12) - pillLen(statuses) - T)}
             <StatusPill statuses={statuses} theme={theme} />
             {pad(T)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
         <Text backgroundColor={base}>
           {pad(M)}
+          <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
             {pad(P)}
             <Text color={theme.textMuted}>Feature:</Text>
@@ -1190,17 +1353,36 @@ const mainScreen = (
                 <Text color={theme.info}>{moduleName}</Text>
               </>
             ) : null}
-            {pad(w - 2 * M - P - featureContent - T)}
+            {pad(w - 2 * M - 2 - P - featureContent - T)}
             {pad(T)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
+        {tutorial && bannerWhat && (
+          <Text backgroundColor={base}>
+            {pad(M)}
+            <Text color={theme.info}>{'\u2503'}</Text>
+            <Text backgroundColor={panel}>
+              {pad(P)}
+              <Text bold color={theme.info}>tutorial</Text>
+              <Text color={theme.text}> {bannerWhat}</Text>
+              {pad(w - 2 * M - 2 - P - 8 - 1 - bannerWhat.length - T)}
+              {pad(T)}
+            </Text>
+            <Text color={theme.info}>{'\u2503'}</Text>
+            {pad(M - 1)}
+            <Block color={base} />
+          </Text>
+        )}
         <Text backgroundColor={base}>
           {pad(M)}
+          <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
-            {pad(w - 2 * M)}
+            {pad(w - 2 * M - 2)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
@@ -1222,14 +1404,13 @@ const mainScreen = (
             expanded={expanded}
             theme={theme}
             w={w}
+            slice={slices[i] as [number, number]}
           />
         ))}
-        {base &&
-          slack > 0 &&
+        {slack > 0 &&
           Array.from({ length: slack }, (_, i) => (
             <Text key={`slack${i}`} backgroundColor={base}>
-              {pad(w - 1)}
-              <Block color={base} />
+              {pad(w)}
             </Text>
           ))}
       </Box>
@@ -1237,12 +1418,14 @@ const mainScreen = (
       {base ? (
         <Text backgroundColor={base}>
           {pad(5)}
-          {statusMsg ? <Text color={theme.warning}>{statusMsg}</Text> : null}
-          {pad(w - 5 - (statusMsg?.length ?? 0) - 1)}
+          {statusMsgLeft ? (
+            <Text color={scrolledUp ? theme.info : theme.warning}>{statusMsgLeft}</Text>
+          ) : null}
+          {pad(w - 5 - statusMsgLen - 1)}
           <Block color={base} />
         </Text>
-      ) : statusMsg ? (
-        <Text color={theme.warning}>{statusMsg}</Text>
+      ) : statusMsgLeft ? (
+        <Text color={scrolledUp ? theme.info : theme.warning}>{statusMsgLeft}</Text>
       ) : null}
 
       {base && (
@@ -1257,8 +1440,9 @@ const mainScreen = (
           {pad(M)}
           <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
-            {pad(w - 2 * M - 1)}
+            {pad(w - 2 * M - 2)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
@@ -1271,9 +1455,10 @@ const mainScreen = (
               <Text bold color={theme.success}>{'› '}</Text>
               <Text color={theme.text}>{typed}</Text>
               <Text color={theme.textMuted}>▌</Text>
-              {pad(w - 2 * M - 1 - 2 - 2 - 1 - typed.length - T)}
+              {pad(w - 2 * M - 2 - 2 - 2 - 1 - typed.length - T)}
               {pad(T)}
             </Text>
+            <Text color={theme.info}>{'\u2503'}</Text>
             {pad(M - 1)}
             <Block color={base} />
           </Text>
@@ -1284,9 +1469,10 @@ const mainScreen = (
             <Text backgroundColor={panel}>
               {pad(2)}
               <Text color={footerColor}>{footerDisplay}</Text>
-              {pad(w - 2 * M - 1 - 2 - footerDisplay.length - T)}
+              {pad(w - 2 * M - 2 - 2 - footerDisplay.length - T)}
               {pad(T)}
             </Text>
+            <Text color={theme.info}>{'\u2503'}</Text>
             {pad(M - 1)}
             <Block color={base} />
           </Text>
@@ -1297,10 +1483,11 @@ const mainScreen = (
           <Text backgroundColor={panel}>
             {pad(2)}
             <Text color={theme.textMuted}>{statusLeft}</Text>
-            {pad(w - 2 * M - 1 - 2 - statusLeft.length - statusRight.length - T)}
+            {pad(w - 2 * M - 2 - 2 - statusLeft.length - statusRight.length - T)}
             <Text bold color={statusColor}>{statusRight}</Text>
             {pad(T)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
@@ -1308,8 +1495,9 @@ const mainScreen = (
           {pad(M)}
           <Text color={theme.info}>{'\u2503'}</Text>
           <Text backgroundColor={panel}>
-            {pad(w - 2 * M - 1)}
+            {pad(w - 2 * M - 2)}
           </Text>
+          <Text color={theme.info}>{'\u2503'}</Text>
           {pad(M - 1)}
           <Block color={base} />
         </Text>
@@ -1389,6 +1577,16 @@ const mainScreen = (
             maxRows={rows}
             maxCols={w}
             onClose={() => setShowRefactor(false)}
+            onApply={() => {
+              if (snap.refactorPending) {
+                sessionRef.current!.acceptRefactorProposal();
+              } else {
+                void sessionRef.current!.applyRefactor();
+              }
+            }}
+            onReject={() => {
+              if (snap.refactorPending) void sessionRef.current!.rejectRefactorProposal();
+            }}
           />
         </Box>
       )}
@@ -1400,6 +1598,18 @@ const mainScreen = (
             maxRows={rows}
             maxCols={w}
             onClose={() => setShowTestReview(false)}
+          />
+        </Box>
+      )}
+      {showGuide && tutorial && guideStep && (
+        <Box position="absolute" alignSelf="center" marginTop={3}>
+          <PhaseGuideOverlay
+            step={guideStep}
+            label={PHASES.find((p) => p.id === guidePhase)!.label}
+            idx={guideIdx}
+            theme={theme}
+            maxCols={w}
+            onClose={() => setShowGuide(false)}
           />
         </Box>
       )}

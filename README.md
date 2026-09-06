@@ -50,6 +50,25 @@ Works with `npm`, `yarn`, `pnpm`, and `bun` (`bunx redgreen`).
 | --- | --- |
 | `redgreen init` | Interactive wizard: provider, model, API key (stored base64-obfuscated in `~/.config/redgreen/config.json`) |
 | `redgreen dev "<feature>"` | Run the TDD loop in the current project (auto-detects vitest, jest, mocha, or node:test) |
+| `redgreen tutorial` | Scaffold a sample rate-limiter project and step through all five phases — key-free (stub AI), no config needed |
+
+### Tutorial
+
+`redgreen tutorial` creates a `redgreen-tutorial/` sandbox, installs vitest, and walks you through the full loop with a deterministic stub AI — no API key or config required. Each phase explains *what* is about to happen and *why*, in a banner under the header:
+
+```bash
+$ npx redgreen tutorial
+# or in a bun project:
+$ bunx redgreen tutorial
+
+# non-interactive demo (CI-friendly); refactor is skipped in headless mode:
+$ redgreen tutorial --headless
+
+# custom sandbox location, skip installing vitest:
+$ redgreen tutorial --dir demo/sandbox --no-install
+```
+
+The feature is a sliding-window rate limiter, so your GREEN phase target is `src/rateLimiter.ts`.
 
 ### LLM providers
 

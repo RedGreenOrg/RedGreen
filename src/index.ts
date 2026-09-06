@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { createRequire } from 'node:module';
 import { initCommand } from './commands/init.js';
 import { devCommand } from './commands/dev.js';
+import { tutorialCommand } from './commands/tutorial.js';
 
 const require = createRequire(import.meta.url);
 const pkg = require('../package.json') as { version: string };
@@ -16,5 +17,6 @@ program
 
 program.addCommand(initCommand);
 program.addCommand(devCommand);
+program.addCommand(tutorialCommand);
 
 await program.parseAsync(process.argv);

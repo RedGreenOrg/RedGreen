@@ -207,6 +207,7 @@ export class DevSession extends EventEmitter {
 
   private pendingWaitResolve: ((choice: WaitChoice) => void) | null = null;
   private waitTimer: NodeJS.Timeout | null = null;
+  private waitAccept: ((choice: WaitChoice) => boolean) | null = null;
   private activeWatcher: ReturnType<typeof watch> | null = null;
 
   constructor(opts: DevSessionOptions) {
@@ -214,7 +215,7 @@ export class DevSession extends EventEmitter {
     this.feature = opts.feature;
     this.runner = opts.runner;
     this.chat = opts.chat;
-    this.cwd = opts.cwd ?? process.cwd();
+    this.cwd = path.resolve(opts.cwd ?? process.cwd());
     this.execute = opts.execute ?? runTests;
     this.headless = opts.headless ?? false;
     this.greenTimeoutMs = opts.greenTimeoutMs ?? null;
@@ -519,6 +520,7 @@ export class DevSession extends EventEmitter {
     this.startedAtMs = Date.now();
     this.loadRules();
     this.pendingWaitResolve = null;
+    this.waitAccept = null;
     if (this.waitTimer) {
       clearTimeout(this.waitTimer);
       this.waitTimer = null;
@@ -530,6 +532,9 @@ export class DevSession extends EventEmitter {
   }
 
   private resolveWait(choice: WaitChoice): void {
+    // Some waits (e.g. the GREEN watcher) must only resolve on quit/timeout;
+    // user keypresses like enter/space (approve) should be ignored there.
+    if (this.waitAccept && !this.waitAccept(choice)) return;
     if (this.waitTimer) {
       clearTimeout(this.waitTimer);
       this.waitTimer = null;
@@ -537,13 +542,18 @@ export class DevSession extends EventEmitter {
     if (this.pendingWaitResolve) {
       const resolve = this.pendingWaitResolve;
       this.pendingWaitResolve = null;
+      this.waitAccept = null;
       resolve(choice);
     }
   }
 
-  private wait(timeoutMs: number | null): Promise<WaitChoice> {
+  private wait(
+    timeoutMs: number | null,
+    accept?: (choice: WaitChoice) => boolean,
+  ): Promise<WaitChoice> {
     return new Promise((resolve) => {
       this.pendingWaitResolve = resolve;
+      this.waitAccept = accept ?? null;
       if (timeoutMs !== null) {
         this.waitTimer = setTimeout(() => {
           this.resolveWait('timeout');
@@ -923,8 +933,12 @@ export class DevSession extends EventEmitter {
       return;
     }
     if (!this.refactor || this.refactor.suggestions.length === 0 || this.finished || this.busyRefactor) return;
+    // Each suggestion may only be applied once. Once every suggestion is
+    // consumed there is nothing left, so `a` becomes a no-op instead of
+    // re-applying the last one over and over.
+    if (this.refactorAccepted >= this.refactor.suggestions.length) return;
 
-    const idx = Math.min(this.refactorAccepted, this.refactor.suggestions.length - 1);
+    const idx = this.refactorAccepted;
     const suggestion = this.refactor.suggestions[idx];
     this.busyRefactor = true;
     this.setPrompt(`Applying "${suggestion.title}" - verifying against the suite...`);
@@ -1026,7 +1040,10 @@ export class DevSession extends EventEmitter {
       const targets = [this.files.impl!, ...(this.files.types ? [this.files.types!] : [])].filter(
         Boolean,
       );
-      const watcher = watch(targets, { ignoreInitial: true });
+      const watcher = watch(targets, {
+        ignoreInitial: true,
+        awaitWriteFinish: { stabilityThreshold: 60, pollInterval: 20 },
+      });
       this.activeWatcher = watcher;
       let debounce: NodeJS.Timeout | null = null;
       let settled = false;
@@ -1055,7 +1072,7 @@ export class DevSession extends EventEmitter {
         }
       };
 
-      watcher.on('change', () => {
+      watcher.on('all', () => {
         if (debounce) clearTimeout(debounce);
         debounce = setTimeout(() => void run(), 300);
       });
@@ -1303,7 +1320,13 @@ export class DevSession extends EventEmitter {
       const targets = [this.files.impl!, ...(this.files.types ? [this.files.types!] : [])].filter(
         Boolean,
       );
-      const watcher = watch(targets, { ignoreInitial: true });
+      // Editors often save via temp-file + rename (atomic writes), which
+      // chokidar reports as add/unlink rather than change. Watch all events
+      // and let writes settle so saves are never missed on Windows.
+      const watcher = watch(targets, {
+        ignoreInitial: true,
+        awaitWriteFinish: { stabilityThreshold: 60, pollInterval: 20 },
+      });
       this.activeWatcher = watcher;
       let debounce: NodeJS.Timeout | null = null;
       let settled = false;
@@ -1333,7 +1356,7 @@ export class DevSession extends EventEmitter {
           } else if (this.quitting) {
             finish(r, 'quit');
           } else {
-            this.setPrompt(null);
+            this.setPrompt('save to re-run · q to quit');
           }
         } catch (err) {
           finish(
@@ -1352,13 +1375,15 @@ export class DevSession extends EventEmitter {
         }
       };
 
-      watcher.on('change', () => {
+      watcher.on('all', () => {
         if (debounce) clearTimeout(debounce);
         debounce = setTimeout(() => void run(), 300);
       });
 
       void run();
-      void this.wait(this.greenTimeoutMs).then((choice) => {
+      // Enter/space (approve) must NOT end the GREEN watch - the suite only
+      // advances on a green run or q/quit (or the headless timeout).
+      void this.wait(this.greenTimeoutMs, (c) => c === 'quit' || c === 'timeout').then((choice) => {
         if (!settled) {
           finish(this.result ?? this.emptyResult(), choice);
         }
