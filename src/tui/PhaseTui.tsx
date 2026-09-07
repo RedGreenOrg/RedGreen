@@ -10,6 +10,7 @@ import type { TestRunner } from '../runners/types.js';
 import { THEME_NAMES, updateTheme, type ThemeName } from '../config/config.js';
 import { THEMES, installSystemTheme, resolveThemeName, type Theme } from './theme.js';
 import { SENT, createCleanStdout } from './screen.js';
+import { windowBlocks } from './window.js';
 import type { HintTier, Hints, RefactorSuggestions } from '../prompts/prompts.js';
 
 export interface TutorialStep {
@@ -1233,23 +1234,14 @@ export function PhaseTui({
   // Line-based windowing: scroll counts lines, not events, so j/k slide the
   // log one row at a time instead of popping whole event blocks in/out.
   const lens = events.map(linesOf);
-  const starts: number[] = [0];
-  for (let i = 0; i < lens.length; i++) starts.push(starts[i] + lens[i]);
-  const total = starts[starts.length - 1];
-  const scrolled = Math.max(0, Math.min(scroll, Math.max(0, total - maxEventsRows)));
-  const bottom = total - scrolled;
-  const top = Math.max(0, bottom - maxEventsRows);
+  const win = windowBlocks(lens, scroll, maxEventsRows);
+  const { total, scrolled, bottom, slack } = win;
   const visible: SessionEvent[] = [];
-  const slices: number[][] = [];
-  for (let i = 0; i < events.length; i++) {
-    const s = starts[i];
-    const e = starts[i + 1];
-    if (e <= top) continue;
-    if (s >= bottom) break;
-    visible.push(events[i]);
-    slices.push([Math.max(0, top - s), Math.min(lens[i], bottom - s)]);
+  const slices: Array<[number, number]> = [];
+  for (const { block, from, to } of win.slices) {
+    visible.push(events[block]);
+    slices.push([from, to]);
   }
-  const slack = Math.max(0, maxEventsRows - (bottom - top));
   // Tutorial hint line (shown in the header box) + the coach modal state.
   const guideIdx = PHASES.findIndex((p) => p.id === guidePhase) + 1;
   const guideStep = tutorial ? tutorial.steps[guidePhase] : undefined;
