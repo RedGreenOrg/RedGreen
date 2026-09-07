@@ -139,7 +139,7 @@ Finished features are recorded to `.redgreen/history.jsonl` in your project. Fut
 - The target module is **never overwritten** by the pipeline — RedGreen writes only the scaffold and the test file; the implementation is yours. The one exception: the refactor phase's `a` temporarily swaps in a suite-verified candidate you must approve.
 - Module names are inferred from the feature description (`"Create a sliding-window rate limiter"` → `src/rateLimiter.ts`).
 - `REDGREEN_GREEN_TIMEOUT` (default `30`s) sets how long GREEN waits for your implementation.
-- Non-TTY terminals get a **headless mode** with the same state machine — CI-friendly. The refactor phase is interactive, so headless runs skip it and report `refactor: -`; set `REDGREEN_REFACTOR=1` to run refactoring unattended (suggestions are suite-verified, and one that breaks a test is reverted automatically).
+- Non-TTY terminals get a **headless mode** with the same state machine — CI-friendly. The refactor phase is interactive, so headless runs skip it and report `refactor: -`; set `REDGREEN_REFACTOR=1` to run refactoring unattended (suggestions are suite-verified, and one that breaks a test is reverted automatically). Headless runs stop after the first attack round by default; set `REDGREEN_ATTACK=1` to auto-advance through all three.
 
 ## Related research
 

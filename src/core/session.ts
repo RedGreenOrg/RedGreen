@@ -104,6 +104,12 @@ export interface DevSessionOptions {
    * suggestion (default: REDGREEN_REFACTOR env var, off unless set to 1/true).
    */
   refactorEnabled?: boolean;
+  /**
+   * In headless runs, auto-advance between attack rounds so all MAX_ATTACK_ROUNDS
+   * run instead of stopping after the first (default: REDGREEN_ATTACK env var,
+   * off unless set to 1/true).
+   */
+  attackEnabled?: boolean;
   /** Include contract-explaining JSDoc on stub functions (default: true). */
   stubComments?: boolean;
 }
@@ -130,6 +136,13 @@ function resolveRetryAttempts(): number {
 // suite-verified suggestion) without human approval - the CI-friendly path.
 function resolveRefactorEnabled(): boolean {
   const raw = process.env.REDGREEN_REFACTOR;
+  return raw === '1' || raw?.toLowerCase() === 'true';
+}
+
+// REDGREEN_ATTACK=1 makes headless runs auto-advance between attack rounds so
+// the full MAX_ATTACK_ROUNDS run instead of stopping after the first.
+function resolveAttackEnabled(): boolean {
+  const raw = process.env.REDGREEN_ATTACK;
   return raw === '1' || raw?.toLowerCase() === 'true';
 }
 
@@ -187,6 +200,7 @@ export class DevSession extends EventEmitter {
   private readonly retryAttempts: number;
   private readonly retryBaseDelayMs: number;
   private readonly refactorEnabled: boolean;
+  private readonly attackEnabled: boolean;
   private recoverableError: string | null = null;
   private solutionError: string | null = null;
   private pipelineStep = 0;
@@ -222,6 +236,7 @@ export class DevSession extends EventEmitter {
     this.retryAttempts = opts.retryAttempts ?? resolveRetryAttempts();
     this.retryBaseDelayMs = opts.retryBaseDelayMs ?? 1500;
     this.refactorEnabled = opts.refactorEnabled ?? resolveRefactorEnabled();
+    this.attackEnabled = opts.attackEnabled ?? resolveAttackEnabled();
     this.stubComments = opts.stubComments ?? true;
     this.memory = new SessionMemory(this.cwd);
     this.loadRules();
@@ -804,10 +819,16 @@ export class DevSession extends EventEmitter {
     this.emitUpdate();
 
     if (round < MAX_ATTACK_ROUNDS) {
-      this.setPrompt('Press Enter for another attack round, s to stop, q to quit');
-      const choice = await this.wait(this.headless ? this.greenTimeoutMs : null);
-      if (choice === 'quit') return 'finish-current';
-      if (choice !== 'approve') this.attackChainDone = true;
+      // Headless auto-advance (REDGREEN_ATTACK=1): run the full three rounds
+      // unattended instead of stopping after the first.
+      if (this.headless && this.attackEnabled) {
+        this.log(`Auto-advancing to attack round ${round + 1} (REDGREEN_ATTACK=1)`);
+      } else {
+        this.setPrompt('Press Enter for another attack round, s to stop, q to quit');
+        const choice = await this.wait(this.headless ? this.greenTimeoutMs : null);
+        if (choice === 'quit') return 'finish-current';
+        if (choice !== 'approve') this.attackChainDone = true;
+      }
     }
     return 'continue';
   }
