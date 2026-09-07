@@ -40,7 +40,7 @@ export const initCommand = new Command('init')
 
     if (!isInteractive()) {
       console.error('Non-interactive init requires flags. Example:');
-      console.error('  npx redgreen init -p openai -k <key> -m gpt-4o');
+      console.error('  npx redgreen init -p openai -k <key> -m gpt-5.2');
       console.error(`  Providers: ${LLM_PROVIDERS.join(' | ')}`);
       process.exit(1);
     }

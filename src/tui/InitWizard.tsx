@@ -6,9 +6,9 @@ import { PROVIDER_ENV, PROVIDER_MODELS } from '../config/config.js';
 import type { LlmProvider, RedGreenConfig } from '../config/config.js';
 
 const PROVIDER_ITEMS: { label: string; value: LlmProvider }[] = [
-  { label: 'OpenAI (gpt-4o)', value: 'openai' },
-  { label: 'Anthropic (claude-3-5-sonnet)', value: 'anthropic' },
-  { label: 'Gemini (gemini-1.5-pro)', value: 'gemini' },
+  { label: 'OpenAI (gpt-5.2)', value: 'openai' },
+  { label: 'Anthropic (claude-sonnet-5)', value: 'anthropic' },
+  { label: 'Gemini (gemini-3.5-flash)', value: 'gemini' },
   { label: 'Ollama (local, no API key)', value: 'ollama' },
 ];
 

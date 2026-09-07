@@ -74,13 +74,24 @@ The feature is a sliding-window rate limiter, so your GREEN phase target is `src
 
 | Provider | Env var | Notes |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY` | `gpt-4o` default |
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-3-5-sonnet` default |
-| Gemini | `GEMINI_API_KEY` | `gemini-1.5-pro` default |
+| OpenAI | `OPENAI_API_KEY` | `gpt-5.2` default |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-5` default |
+| Gemini | `GEMINI_API_KEY` | `gemini-3.5-flash` default |
 | Ollama | — | local HTTP, any model, key-free |
 | `stub` | — | deterministic responses for CI and demos; hidden from the init wizard |
 
 Config precedence: **env var > `~/.config/redgreen/config.json`**. Keys never leave your machine (BYOK, no proxy).
+
+The default model is a safe modern pick per provider, but it's just a default: the init wizard asks for the model, or set `"model"` under your provider's key in `~/.config/redgreen/config.json`. Full config shape:
+
+```jsonc
+{
+  "provider": "anthropic",
+  "model": "claude-sonnet-5",
+  "apiKey": "b64:<base64>",
+  "stubComments": true
+}
+```
 
 ### In the loop
 

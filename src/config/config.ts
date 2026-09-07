@@ -14,9 +14,9 @@ export const THEME_NAMES: readonly string[] = [
 export type ThemeName = 'opencode' | 'system' | OpenCodeThemeName;
 
 export const PROVIDER_MODELS: Record<LlmProvider, string> = {
-  openai: 'gpt-4o',
-  anthropic: 'claude-3-5-sonnet',
-  gemini: 'gemini-1.5-pro',
+  openai: 'gpt-5.2',
+  anthropic: 'claude-sonnet-5',
+  gemini: 'gemini-3.5-flash',
   ollama: 'llama3.1',
   stub: 'stub',
 };
