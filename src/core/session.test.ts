@@ -108,6 +108,36 @@ test('runs the full scaffold -> red -> green -> attack cycle headlessly', async 
   assert.ok(summaryEv.message.includes('total'));
 });
 
+test('REDGREEN_ATTACK auto-advances through all three attack rounds', async () => {
+  const cwd = tempProject();
+  const session = new DevSession({
+    feature: 'Build a rate limiter',
+    runner: 'vitest',
+    chat: fakeChat(),
+    execute: queueExecutor(['red', 'green', 'green', 'green', 'green', 'green']),
+    headless: true,
+    greenTimeoutMs: 50,
+    attackEnabled: true,
+    cwd,
+  });
+
+  await session.start();
+  session.dispose();
+
+  const snap = session.snapshot();
+  assert.equal(snap.finished, true);
+  assert.equal(snap.attackRoundsSurvived, 3);
+  assert.equal(snap.finalGreen, true);
+  const attackRound3 = snap.events.find((e) => e.type === 'attack' && e.round === 3);
+  assert.ok(attackRound3 && attackRound3.type === 'attack' && attackRound3.survived === true);
+  const attackEvents = snap.events.filter((e) => e.type === 'attack');
+  assert.equal(attackEvents.length, 3, 'one survived event per attack round');
+  assert.ok(snap.logs.join('\n').includes('Attack round 3 survived'));
+  const summaryEv = snap.events.find((e) => e.type === 'summary');
+  assert.ok(summaryEv && summaryEv.type === 'summary');
+  assert.ok(summaryEv.message.includes('attacks 3/3'));
+});
+
 test('reuses an existing module on disk instead of calling the LLM', async () => {
   const cwd = tempProject();
   fs.mkdirSync(path.join(cwd, 'src'), { recursive: true });
@@ -687,7 +717,7 @@ test('runs the refactor phase interactively: AI suggestions then a green watch',
     feature: 'Build a rate limiter',
     runner: 'vitest',
     chat: refactorChat(),
-    execute: queueExecutor(['red', 'green', 'green', 'green', 'green']),
+    execute: queueExecutor(['red', 'green', 'green', 'green', 'green', 'green']),
     headless: false,
     greenTimeoutMs: 500,
     cwd,
@@ -838,7 +868,7 @@ test('auto-rejects a refactor when the suite breaks and restores the file', asyn
     feature: 'Build a rate limiter',
     runner: 'vitest',
     chat: refactorChat(),
-    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green', 'red', 'green']),
+    execute: queueExecutor(['red', 'red', 'green', 'green', 'green', 'green', 'green', 'green', 'green', 'red', 'green']),
     headless: false,
     greenTimeoutMs: 500,
     cwd,

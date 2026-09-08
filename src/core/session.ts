@@ -116,10 +116,11 @@ export interface DevSessionOptions {
 
 const MAX_ATTACK_ROUNDS = 3;
 const MAX_REFACTOR_ROUNDS = 1;
-// 0 scaffold · 1 review gate · 2 red · 3 green watch · 4..6 attack rounds ·
-// 7..8 refactor rounds
-const PIPELINE_STEPS = 3 + MAX_ATTACK_ROUNDS + MAX_REFACTOR_ROUNDS;
-const REFACTOR_STEP = 3 + MAX_ATTACK_ROUNDS;
+// 0 scaffold · 1 review gate · 2 red · 3 green watch · 4..6 attack rounds (3) ·
+// 7 refactor round. Attack rounds are dispatched as `stepAttack(step - 3)`, so
+// the refactor switch arm must sit AFTER the last attack step.
+const PIPELINE_STEPS = 4 + MAX_ATTACK_ROUNDS + MAX_REFACTOR_ROUNDS;
+const REFACTOR_STEP = 4 + MAX_ATTACK_ROUNDS;
 
 type StepOutcome =
   | 'continue' // move on to the next pipeline step
