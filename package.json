@@ -1,6 +1,6 @@
 {
   "name": "redgreen",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Reclaim your coding flow state with Type-First Ping-Pong TDD",
   "type": "module",
   "license": "MIT",
