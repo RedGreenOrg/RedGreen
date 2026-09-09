@@ -9,6 +9,7 @@ const PROVIDER_ITEMS: { label: string; value: LlmProvider }[] = [
   { label: 'OpenAI (gpt-5.2)', value: 'openai' },
   { label: 'Anthropic (claude-sonnet-5)', value: 'anthropic' },
   { label: 'Gemini (gemini-3.5-flash)', value: 'gemini' },
+  { label: 'OpenRouter (openrouter/auto - any model)', value: 'openrouter' },
   { label: 'Ollama (local, no API key)', value: 'ollama' },
 ];
 

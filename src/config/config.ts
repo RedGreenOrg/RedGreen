@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { getConfigPath } from '../utils/paths.js';
 import { OPENCODE_THEME_NAMES, type OpenCodeThemeName } from '../tui/opencodeThemes.generated.js';
 
-export const LLM_PROVIDERS = ['openai', 'anthropic', 'gemini', 'ollama', 'stub'] as const;
+export const LLM_PROVIDERS = ['openai', 'anthropic', 'gemini', 'openrouter', 'ollama', 'stub'] as const;
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
 
 export const THEME_NAMES: readonly string[] = [
@@ -17,6 +17,7 @@ export const PROVIDER_MODELS: Record<LlmProvider, string> = {
   openai: 'gpt-5.2',
   anthropic: 'claude-sonnet-5',
   gemini: 'gemini-3.5-flash',
+  openrouter: 'openrouter/auto',
   ollama: 'llama3.1',
   stub: 'stub',
 };
@@ -25,6 +26,7 @@ export const PROVIDER_ENV: Record<LlmProvider, string> = {
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   gemini: 'GEMINI_API_KEY',
+  openrouter: 'OPENROUTER_API_KEY',
   ollama: '',
   stub: '',
 };

@@ -74,11 +74,14 @@ The feature is a sliding-window rate limiter, so your GREEN phase target is `src
 
 | Provider | Env var | Notes |
 | --- | --- | --- |
-| OpenAI | `OPENAI_API_KEY` | `gpt-5.2` default |
+| OpenAI | `OPENAI_API_KEY` | `gpt-5.2` default; any OpenAI-compatible endpoint via a custom `baseUrl` |
 | Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-5` default |
 | Gemini | `GEMINI_API_KEY` | `gemini-3.5-flash` default |
+| OpenRouter | `OPENROUTER_API_KEY` | OpenAI-compatible gateway; `openrouter/auto` default, or any model id like `anthropic/claude-sonnet-5` |
 | Ollama | — | local HTTP, any model, key-free |
 | `stub` | — | deterministic responses for CI and demos; hidden from the init wizard |
+
+OpenRouter (or any OpenAI-compatible API — Groq, Together, local LM Studio/llama.cpp, …) slots in without new providers: pick `OpenRouter` in the wizard, or set `"provider": "openai"` plus `"baseUrl": "<endpoint>/v1"` in the config to point at a compatible gateway.
 
 Config precedence: **env var > `~/.config/redgreen/config.json`**. Keys never leave your machine (BYOK, no proxy).
 

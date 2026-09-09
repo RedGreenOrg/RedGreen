@@ -192,18 +192,28 @@ async function ollamaChat(config: RedGreenConfig, turn: ChatTurn): Promise<strin
   }
 }
 
+// OpenRouter exposes an OpenAI-compatible API. `openrouter/auto` routes each
+// request to a good model automatically; any specific model id also works
+// (e.g. `anthropic/claude-sonnet-5` or `openai/gpt-5.2`).
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+
 function sdkChat(
-  provider: 'openai' | 'anthropic' | 'gemini',
+  provider: 'openai' | 'openrouter' | 'anthropic' | 'gemini',
   apiKey: string,
   model: string,
+  baseURL: string | undefined,
+  compatible: boolean,
 ): ChatFn {
   const client =
-    provider === 'openai'
-      ? createOpenAI({ apiKey })
-      : provider === 'anthropic'
-        ? createAnthropic({ apiKey })
-        : createGoogleGenerativeAI({ apiKey });
-  const modelRef = client(model);
+    provider === 'anthropic'
+      ? createAnthropic({ apiKey })
+      : provider === 'gemini'
+        ? createGoogleGenerativeAI({ apiKey })
+        : // OpenAI family. OpenAI proper keeps the default Responses API path;
+          // any custom endpoint (OpenRouter or an OpenAI-compatible gateway)
+          // must use the chat-completions API instead.
+          createOpenAI({ apiKey, baseURL });
+  const modelRef = compatible ? client.chat(model) : client(model);
   return async (turn) => {
     const { text } = await generateText({
       model: modelRef,
@@ -225,5 +235,17 @@ export function createChat(config: RedGreenConfig): ChatFn {
       `No API key for provider "${config.provider}". Set the ${config.provider.toUpperCase()}_API_KEY env var or run: npx redgreen init`,
     );
   }
-  return sdkChat(config.provider, apiKey, config.model ?? PROVIDER_MODELS[config.provider]);
+  // OpenRouter always goes through its own base URL unless overridden. Any
+  // provider of the OpenAI family can also point at an OpenAI-compatible
+  // gateway via `baseUrl`, which forces chat-completions compatibility.
+  const baseURL =
+    config.baseUrl ?? (config.provider === 'openrouter' ? OPENROUTER_BASE_URL : undefined);
+  const compatible = config.provider === 'openrouter' || Boolean(config.baseUrl);
+  return sdkChat(
+    config.provider,
+    apiKey,
+    config.model ?? PROVIDER_MODELS[config.provider],
+    baseURL,
+    compatible,
+  );
 }
